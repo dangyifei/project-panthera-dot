@@ -37,7 +37,7 @@ public class DotConstants {
   public static final String HBASE_DOT_COLUMNFAMILY_DOC_ELEMENT = "hbase.dot.columnfamily.doc.element";
   public static final String HBASE_DOT_COLUMNFAMILY_DOC_SCHEMA_PREFIX = "hbase.dot.columnfamily.doc.schema.";
   public static final String HBASE_DOT_COLUMNFAMILY_DOC_SERIALIZER_CLASS = "hbase.dot.columnfamily.doc.serializer.class";
-  public static final String HBASE_DOT_COLUMNFAMILY_DOC_SERIALIZER_CLASS_DEFAULT = "org.apache.hadoop.hbase.dot.doc.serializer.AvroDoc";
+  public static final String HBASE_DOT_COLUMNFAMILY_DOC_SERIALIZER_CLASS_DEFAULT = "com.intel.hadoop.hbase.dot.doc.serializer.AvroDoc";
 
   public static final byte HBASE_DOT_DOC_AND_FIELD_SEPERATOR = '.';
   public static final String HBASE_DOT_COLUMNFAMILY_AND_DOC_SEPERATOR = ":";

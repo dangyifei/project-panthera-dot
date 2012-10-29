@@ -567,9 +567,9 @@ public class TestDataManipulation {
   public static void setUp() throws Exception {
     Configuration config = TEST_UTIL.getConfiguration();
     config.set("hbase.coprocessor.region.classes",
-        "org.apache.hadoop.hbase.dot.access.DataManipulationOps");
+        "com.intel.hadoop.hbase.dot.access.DataManipulationOps");
     config.set("hbase.coprocessor.master.classes",
-        "org.apache.hadoop.hbase.dot.access.DataDefinitionOps");
+        "com.intel.hadoop.hbase.dot.access.DataDefinitionOps");
     TEST_UTIL.startMiniCluster(1);
     initialize(TEST_UTIL.getConfiguration());
   }
