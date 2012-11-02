@@ -64,6 +64,7 @@ public class TestHiveIntegration {
   private static HBaseAdmin admin = null;
   private static byte[] name = Bytes.toBytes("test");
 
+/*  
   @Test
   public void importtsv() {
 
@@ -99,7 +100,7 @@ public class TestHiveIntegration {
     assertTrue("ImportTSV operation failed", success);
 
   }
-
+*/
   @Test
   public void bulkload() {
     String[] args = new String[] { "/bulkload", new String(name) };

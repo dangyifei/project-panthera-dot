@@ -33,7 +33,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.mapreduce.ImportTsv.TsvParser;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.util.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -96,8 +95,6 @@ public class DotUtil {
 
     for (String aColumn : columns) {
 
-      if (TsvParser.ROWKEY_COLUMN_SPEC.equals(aColumn))
-        continue;
       byte[] columnName = aColumn.getBytes();
       // we are only concerned with the first one (in case this is a cf:cq)
       byte[][] cfvsdoc = org.apache.hadoop.hbase.KeyValue
