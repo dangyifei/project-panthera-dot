@@ -53,9 +53,9 @@ public class GenerateTestTable {
   private final int MAX_FAMILY_NUM = 10;
   private final int DEFAULT_FAMILY_NUM = 1;
   private final long MAX_ROW_NUM = 10000000000L;
-  private final long DEFAULT_ROW_NUM = 1000;
-  private final int MAX_REGION_NUM = 512;
-  private final int DEFAULT_REGION_NUMBER = 64;
+  private final long DEFAULT_ROW_NUM = 10000;
+  private final int MAX_REGION_NUM = 2048;
+  private final int DEFAULT_REGION_NUMBER = 96;
 
   private final String[] rowPrefix = {
       "a","b","c","d","e","f","g","h","i","j","k","l","m",
@@ -69,6 +69,7 @@ public class GenerateTestTable {
   private long rowNum = this.DEFAULT_ROW_NUM;
   private int cfNum = this.DEFAULT_FAMILY_NUM;
   private int regionNumber = this.DEFAULT_REGION_NUMBER;
+  private long baseRowNumber = 1L;
   private String tableName = null;
 
   
@@ -264,7 +265,7 @@ public class GenerateTestTable {
       layouts.put(family, columns);
     }
     
-    tableSplits = getTwoLetterSplits(this.regionNumber);
+    tableSplits = getFourLetterSplits(this.regionNumber);
 
     String DotTableName  =this.tableName + "Dot";
     createDotTable(DotTableName, layouts, tableSplits);
@@ -292,7 +293,12 @@ public class GenerateTestTable {
       List<Put> putList = new ArrayList<Put>(toProcess);
 
       for (long i = 0; i < toProcess; i++){
-        row = rowPrefix[(int)((index / 26) % 26)] + rowPrefix[(int)(index % 26)] + Long.toString(this.MAX_ROW_NUM + index);
+        row = rowPrefix[(int)((index / (26*26*26)) % 26)]
+            + rowPrefix[(int)((index / (26*26)) % 26)]
+            + rowPrefix[(int)((index / 26) % 26)] 
+            + rowPrefix[(int)(index % 26)]
+            + Long.toString(this.baseRowNumber + index);
+        
         Put p = new Put(Bytes.toBytes(row));
         p.setWriteToWAL(false);
         for (String family : familys) {
@@ -363,7 +369,28 @@ public class GenerateTestTable {
     }
     return splits;
   }
-  
+
+  private byte[][] getFourLetterSplits(int n) {
+    double range = 26.0 * 26.0 * 26.0 * 26.0;
+    assert(n > 0 && n < MAX_REGION_NUM);
+    byte[][] splits = new byte[n-1][];
+
+    double step = range / n;
+    double offset = 0.0;
+    long index;
+    char[] letter = new char[4];
+    for (int i = 0; i < (n-1); i++) {
+      offset += step;
+      index = Math.round(offset);
+      letter[0] = (char) ((index / (26*26*26)) + 97);
+      letter[1] = (char) ((index / (26*26) % 26) + 97);
+      letter[2] = (char) ((index / (26) % 26) + 97);
+      letter[3] = (char) ((index % 26) + 97);
+      splits[i] = Bytes.toBytes(new String(letter));
+    }
+    return splits;
+  }
+
   public int parseCommandLine(final String[] args) {
     // (but hopefully something not as painful as cli options).
     int errCode = 0;
@@ -427,9 +454,16 @@ public class GenerateTestTable {
         errCode = -2;
     }
 
+    this.baseRowNumber = 1L;
+    
+    while(this.baseRowNumber < this.rowNum) {
+      this.baseRowNumber *= 10L;
+    }
+   
     System.out.println("cfnum = " + this.cfNum);
     System.out.println("colnum = " + this.colNum);
     System.out.println("rownum = " + this.rowNum);
+    System.out.println("baseRowNumber = " + this.baseRowNumber);
     System.out.println("tablename = " + this.tableName);
     System.out.println("Presplit Region number = " + this.regionNumber);
     return errCode;
