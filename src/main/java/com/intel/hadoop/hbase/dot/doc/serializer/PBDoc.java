@@ -120,8 +120,7 @@ public class PBDoc extends Document {
   }
 
   @Override
-  public Set<byte[]> getFields() throws IOException {
-
+  public List<DocSchemaField> getFields() throws IOException {
     return null;
   }
 

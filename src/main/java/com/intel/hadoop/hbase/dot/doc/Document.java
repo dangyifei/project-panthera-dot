@@ -35,8 +35,19 @@ import com.intel.hadoop.hbase.dot.DotConstants;
  * The document APIs for all kinds of serializers, like Avro, PB and so on.
  *
  */
+
 public abstract class Document implements Writable {
   protected String nullStr = null;
+  
+  public class DocSchemaField {
+    // field in raw byte[]
+    public byte[] field = null;
+    // doc+field in raw byte[]
+    public byte[] docWithField = null;
+    // field in String format
+    public String name = null;
+  }
+  
   /**
    * The only way to create a serializer instance
    */
@@ -164,6 +175,17 @@ public abstract class Document implements Writable {
    */
   abstract public byte[] getValue(byte[] field) throws IOException;
 
+  
+  /**
+   * Get all fields' value
+   * 
+   * @return
+   * @throws IOException
+   */
+  public List<byte[]> getValues() throws IOException{
+    return null;
+  }
+
   /**
    * Set the corresponding value for certain field
    *
@@ -206,7 +228,7 @@ public abstract class Document implements Writable {
    * @return
    * @throws IOException
    */
-  abstract public Set<byte[]> getFields() throws IOException;
+  abstract public List<DocSchemaField> getFields() throws IOException;
 
   /**
    * Check if all fields have been initialized with correct value.

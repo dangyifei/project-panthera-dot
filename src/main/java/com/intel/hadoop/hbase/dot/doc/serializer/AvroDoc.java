@@ -25,6 +25,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -46,8 +47,15 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.Writable;
 
+import com.intel.hadoop.hbase.dot.DotUtil;
 import com.intel.hadoop.hbase.dot.doc.DocSchemaMissMatchException;
 import com.intel.hadoop.hbase.dot.doc.Document;
+import com.intel.hadoop.hbase.dot.doc.Document.DocSchemaField;
+
+class AvroData {
+  public Schema schema = null;
+  List<DocSchemaField> fields = null;
+}
 
 /**
  * Avro encoder and decoder for document
@@ -60,18 +68,41 @@ public class AvroDoc extends Document implements Writable{
   private Schema schema = null;
   private Encoder encoder = null;
   private Decoder decoder = null;
-  private Set<byte[]> fields = null;
+  private List<DocSchemaField> fields = null;
 
   private ByteArrayOutputStream out = null;
 
   private GenericRecord record = null;
 
   @Override
-  protected Schema _parseSchema(String schema) {
-    return Schema.parse(schema);
+  protected AvroData _parseSchema(String schema) {
+    AvroData result = new AvroData();
+    Schema s = Schema.parse(schema);
+
+    byte[] doc = s.getName().getBytes();
+
+    List<Schema.Field> avroFields = s.getFields();
+    result.fields = new ArrayList<DocSchemaField>(avroFields.size());
+
+    // TODO Fixme, should sort on name string directly. 
+    Set<byte[]> sortFields = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
+    for (Schema.Field f : avroFields) {
+      sortFields.add(f.name().getBytes());
+    }
+    
+    for (byte[] field : sortFields) {
+      DocSchemaField d = new DocSchemaField();
+      d.name = new String(field);
+      d.field = field;
+      d.docWithField = DotUtil.combineDocAndField(doc, field);
+      result.fields.add(d);
+    }
+
+    result.schema = s;
+    return result;
   }
 
-  protected Schema _parseSchema(Path schemafile) {
+  protected AvroData _parseSchema(Path schemafile) {
     return null;
   }
 
@@ -81,11 +112,12 @@ public class AvroDoc extends Document implements Writable{
     this.schema = Schema.parse(schema);
   }
 
-  public void loadSchema(Object schema) throws IOException {
-    if (schema == null)
+  public void loadSchema(Object data) throws IOException {
+    if (data == null)
       return;
-    if (schema instanceof Schema) {
-      this.schema = (Schema) schema;
+    if (data instanceof AvroData) {
+      this.schema = ((AvroData)data).schema;
+      this.fields = ((AvroData)data).fields;
     }
   }
 
@@ -113,9 +145,8 @@ public class AvroDoc extends Document implements Writable{
     return this.encoder;
   }
 
-  @Override
-  public byte[] getValue(byte[] field) {
-    Object value = this.record.get(new String(field));
+  byte[] getValue(String field) {
+    Object value = this.record.get(field);
     if (null != value) {
       ByteBuffer buf = (ByteBuffer) value;
       // when reusing record, ByteBuffer size could be larger than actual data
@@ -124,7 +155,21 @@ public class AvroDoc extends Document implements Writable{
     }
     return null;
   }
+  
+  @Override
+  public byte[] getValue(byte[] field) {
+    return getValue(new String(field));
+  }
 
+  @Override
+  public List<byte[]> getValues() {
+    List<byte[]> result = new ArrayList<byte[]>(this.fields.size());
+    for (DocSchemaField d : this.fields) {
+      result.add(getValue(d.name));
+    }
+    return result;
+  }
+  
   @Override
   public void setValue(byte[] field, byte[] value) throws IOException {
     try {
@@ -157,12 +202,7 @@ public class AvroDoc extends Document implements Writable{
   }
 
   @Override
-  public Set<byte[]> getFields() throws IOException {
-    if(this.fields != null) return this.fields;
-    this.fields = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
-    for (Schema.Field f : this.schema.getFields()) {
-      fields.add(f.name().getBytes());
-    }
+  public List<DocSchemaField> getFields() throws IOException {
     return fields;
   }
 
@@ -302,9 +342,7 @@ public class AvroDoc extends Document implements Writable{
   public void initialize(Object schema, Object encoder, OutputStream out)
       throws IOException {
 
-    if (schema instanceof Schema) {
-      this.schema = (Schema) schema;
-    }
+    loadSchema(schema);
     record = new GenericData.Record(this.schema);
 
     setEncoder(encoder);
