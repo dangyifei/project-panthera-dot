@@ -43,6 +43,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import com.intel.hadoop.hbase.dot.DotConstants;
 import com.intel.hadoop.hbase.dot.DotInvalidIOException;
 import com.intel.hadoop.hbase.dot.DotUtil;
+import com.intel.hadoop.hbase.dot.doc.Document.DocSchemaField;
 import com.intel.hadoop.hbase.dot.doc.Document;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.regionserver.ChangedReadersObserver;
@@ -304,12 +305,13 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
     }
 
     // get all fields under one doc
-    Set<byte[]> fieldList = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
-    fieldList = docObject.getFields();
+    List<DocSchemaField> fieldList = docObject.getFields();
+    List<byte[]> values = docObject.getValues();
 
-    for (byte[] field : fieldList) {
-      byte[] newQualifier = DotUtil.combineDocAndField(qualifier, field);
-      byte[] newValue = docObject.getValue(field);
+    assert (fieldList.size() == values.size());
+    for (int i = 0; i < fieldList.size(); i++) {
+      byte[] newQualifier = fieldList.get(i).docWithField;
+      byte[] newValue = values.get(i);
       if (Bytes.equals(newValue, nullFormatBytes)) {
         // if newValue is null, won't add it to the final result list
         continue;
