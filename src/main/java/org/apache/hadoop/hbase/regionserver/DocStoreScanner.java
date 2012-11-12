@@ -288,8 +288,9 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
    * @param kv raw doc KeyValue.
    * @param results List that decoded KeyValues be added to.
    * @throws IOException
+   * @return return false if raw key returned. True if is decrypted.
    */
-  private void decryptDocKV(KeyValue kv, List<KeyValue> results) throws IOException {
+  private boolean decryptDocKV(KeyValue kv, List<KeyValue> results) throws IOException {
 
     byte[] qualifier = DotUtil.getKVQualifier(kv);
 
@@ -298,10 +299,11 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
     Document docObject = null;
     docObject = getDocForKV(kv);
-    if ((null == docObject) && kv.isDeleteFamily()) {
-      // A DeleteFamily type kv don't have qualifier field.
+    if ((null == docObject)) {
+      // If we don't find a corresponding docObject, just return the key
+      // It might due to A DeleteFamily type kv or if not lucky, something wrong?.
       results.add(kv);
-      return;
+      return false;
     }
 
     // get all fields under one doc
@@ -322,6 +324,8 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
           KVtimestamp, KVtype, newValue, 0, newValue.length);
       results.add(newKV);
     }
+    
+    return true;
   }
 
 
@@ -474,6 +478,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
     long cumulativeMetric = 0;
     int count = 0;
+    boolean isRawKV = false;
     try {
       LOOP: while((rawKV = this.heap.peek()) != null) {
         if (prevKV != null && comparator != null) {
@@ -490,8 +495,9 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
         prevKV = rawKV;
         
         realKVs.clear();
+        isRawKV = false;
         if (remainKVs.isEmpty()) {
-          decryptDocKV(rawKV, realKVs);
+          isRawKV = !decryptDocKV(rawKV, realKVs);
         } else {
           // we are on the same KV we leave last time due to 'limit' is reached.
           // just complete the remain part of the KV
@@ -522,8 +528,10 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
               skipDoc = true;
             } else if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_COL) {
               // TODO need to fix this correctly.
-              // currently , just ignore it.
-              //reseek(matcher.getKeyForNextColumn(kv));
+              // currently , just ignore it when it is not raw kv.
+              if (isRawKV) {
+                reseek(matcher.getKeyForNextColumn(kv));
+              }
             } else {
             }
 
@@ -567,8 +575,10 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
           case SEEK_NEXT_COL:
             // TODO need to fix this correctly.
-            // Just ignore this for now.
-            //reseek(matcher.getKeyForNextColumn(kv));
+            // Just ignore this for now if it is not raw kv.
+            if(isRawKV) {
+              reseek(matcher.getKeyForNextColumn(kv));
+            }
             continue;
 
           case SKIP:
