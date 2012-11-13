@@ -310,6 +310,11 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
     List<DocSchemaField> fieldList = docObject.getFields();
     List<byte[]> values = docObject.getValues();
 
+    int rowOffset = kv.getRowOffset();
+    short rowLen = kv.getRowLength();
+    int familyOffset = kv.getFamilyOffset();
+    byte familyLen = kv.getFamilyLength();
+    
     assert (fieldList.size() == values.size());
     for (int i = 0; i < fieldList.size(); i++) {
       byte[] newQualifier = fieldList.get(i).docWithField;
@@ -318,9 +323,9 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
         // if newValue is null, won't add it to the final result list
         continue;
       }
-      KeyValue newKV = new KeyValue(kv.getBuffer(), kv.getRowOffset(),
-          kv.getRowLength(), kv.getBuffer(), kv.getFamilyOffset(),
-          kv.getFamilyLength(), newQualifier, 0, newQualifier.length,
+      KeyValue newKV = new KeyValue(kv.getBuffer(), rowOffset,
+          rowLen, kv.getBuffer(), familyOffset,
+          familyLen, newQualifier, 0, newQualifier.length,
           KVtimestamp, KVtype, newValue, 0, newValue.length);
       results.add(newKV);
     }
