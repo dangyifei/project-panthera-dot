@@ -101,8 +101,87 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
   private Map<byte[], Document> docObjCache  = new TreeMap<byte[], Document>(Bytes.BYTES_COMPARATOR);
   private byte[] nullFormatBytes;
 
-  private List<KeyValue> remainKVs = new ArrayList<KeyValue>();
+  private DocKV remainKV = null;
 
+  class DocKV {
+    private long KVtimestamp;
+    private Type KVtype;
+    private Document docObject = null;
+    private List<DocSchemaField> fieldList;
+    private List<byte[]> values;
+    private int rowOffset;
+    private short rowLen;
+    private int familyOffset;
+    private byte familyLen;
+    private int index = 0;
+    private int kvSize = 1;
+    private KeyValue rawKV = null;
+    boolean isRaw = false;
+
+    public DocKV(KeyValue kv) throws IOException {
+
+      docObject = getDocForKV(kv);
+      rawKV = kv;
+      if ((null == docObject)) {
+        isRaw = true;
+        return;
+      }
+
+      KVtimestamp = kv.getTimestamp();
+      KVtype = Type.codeToType(kv.getType());
+
+      // get all fields under one doc
+      fieldList = docObject.getFields();
+      values = docObject.getValues();
+
+      rowOffset = kv.getRowOffset();
+      rowLen = kv.getRowLength();
+      familyOffset = kv.getFamilyOffset();
+      familyLen = kv.getFamilyLength();
+
+      assert (fieldList.size() == values.size());
+      kvSize = fieldList.size();
+
+      return;
+    }
+    
+    public KeyValue getNextKV() {
+      
+      if(isRaw) {
+        // only return once the rawKV
+        index++;
+        return index > 1 ? null : rawKV;
+      }
+        
+      byte[] newQualifier = null;
+      byte[] newValue = null;
+
+      while(index < kvSize) {
+        newQualifier = fieldList.get(index).docWithField;
+        newValue = values.get(index);
+        if (!Bytes.equals(newValue, nullFormatBytes))
+          break;
+
+        // if newValue is null, continue search;
+        index++;
+        continue;
+      }
+
+      if (index >= kvSize)
+        return null;
+      
+      index++;
+      return new KeyValue(rawKV.getBuffer(), rowOffset,
+          rowLen, rawKV.getBuffer(), familyOffset,
+          familyLen, newQualifier, 0, newQualifier.length,
+          KVtimestamp, KVtype, newValue, 0, newValue.length);
+    }
+    
+    public boolean isDone() {
+      return index >= kvSize;
+    }
+  }
+  
   /** An internal constructor. */
   private DocStoreScanner(Store store, boolean cacheBlocks, Scan scan,
       final NavigableSet<byte[]> columns, long ttl, int minVersions) {
@@ -473,9 +552,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
     KeyValue rawKV;
     KeyValue prevKV = null;
-
-    // TODO need to sort the List to have SEEK_NEXT_COL working right.
-    List<KeyValue> realKVs = new ArrayList<KeyValue>();
+    DocKV dockv = null;
 
     // Only do a sanity-check if store and comparator are available.
     KeyValue.KVComparator comparator =
@@ -499,20 +576,23 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
         prevKV = rawKV;
         
-        realKVs.clear();
-        isRawKV = false;
-        if (remainKVs.isEmpty()) {
-          isRawKV = !decryptDocKV(rawKV, realKVs);
+        if (remainKV == null) {
+          dockv = new DocKV(rawKV);
         } else {
           // we are on the same KV we leave last time due to 'limit' is reached.
           // just complete the remain part of the KV
-          realKVs.addAll(remainKVs);
-          remainKVs.clear();
+          dockv = remainKV;
+          remainKV = null;
         }
 
+        isRawKV = dockv.isRaw;
         boolean skipDoc = false;
         // TODO : need to handle batch operation (limit), i.e. need to handle various seek
-        for (KeyValue kv: realKVs) {
+        while(true) {
+          KeyValue kv = dockv.getNextKV();
+          if (kv == null)
+            break;
+          
           ScanQueryMatcher.MatchCode qcode = matcher.match(kv);
           switch(qcode) {
           case INCLUDE:
@@ -543,14 +623,12 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
             cumulativeMetric += kv.getLength();
             if (limit > 0 && (count == limit)) {
               // TODO Double Check the boundary condition carefully.
-              int currentIndex = realKVs.indexOf(kv);
-              int kvNum = realKVs.size();
 
               // check whether we are already done on this DOC
-              if (currentIndex == (kvNum - 1))
+              if (dockv.isDone())
                 break LOOP;
 
-              remainKVs.addAll(realKVs.subList(currentIndex + 1, kvNum));
+              remainKV = dockv;
               break LOOP;
             }
 
