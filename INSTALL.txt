@@ -1,0 +1,22 @@
+
+## Build from source code ##
+
+In order to run DOT coprocessor against HBASE, you need to build it against HBASE 0.94.1 with patch file at present. The patch are backported from HBASE trunk, including HBASE-6032, FilterWrapper and CP Interface preStoreScannnerOpen related codes. To build against HBASE trunk
+
+
+* Apply patches/dot-on-hbase-0.94.1.patch on top of hbase 0.94.1 tag. Then build,install and setup cluster following HBase's common guide doc.
+* run mvn clean package to generate compile and generate jar package for DOT coprocessor.
+* Copy target/dot-xxx.jar to HBASE cluster's Class finding path e.g. HBASE_DIST/lib/ dir.
+* Add following property to hbase-site.xml
+
+   <property>
+     <name>hbase.coprocessor.region.classes</name>
+     <value>com.intel.hadoop.hbase.dot.access.DataManipulationOps</value>
+   </property>
+
+   <property>
+     <name>hbase.coprocessor.master.classes</name>
+     <value>com.intel.hadoop.hbase.dot.access.DataDefinitionOps</value>
+   </property>
+
+Now, DOT coprocessor should be ready to use by HBASE

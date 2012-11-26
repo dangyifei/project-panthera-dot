@@ -1,0 +1,1728 @@
+diff --git a/src/main/java/org/apache/hadoop/hbase/HConstants.java b/src/main/java/org/apache/hadoop/hbase/HConstants.java
+index 7f152b4..53fbb75 100644
+--- a/src/main/java/org/apache/hadoop/hbase/HConstants.java
++++ b/src/main/java/org/apache/hadoop/hbase/HConstants.java
+@@ -647,6 +647,17 @@ public final class HConstants {
+   public static final String ENABLE_WAL_COMPRESSION =
+     "hbase.regionserver.wal.enablecompression";
+ 
++/** Region in Transition metrics threshold time */
++  public static final String METRICS_RIT_STUCK_WARNING_THRESHOLD="hbase.metrics.rit.stuck.warning.threshold";
++
++  public static final String LOAD_BALANCER_SLOP_KEY = "hbase.regions.slop";
++
++  /**
++   * The byte array represents for NO_NEXT_INDEXED_KEY;
++   * The actual value is irrelevant because this is always compared by reference.
++   */
++  public static final byte [] NO_NEXT_INDEXED_KEY = Bytes.toBytes("NO_NEXT_INDEXED_KEY");
++
+   private HConstants() {
+     // Can't be instantiated with this ctor.
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/KeyValue.java b/src/main/java/org/apache/hadoop/hbase/KeyValue.java
+index 5944383..5548271 100644
+--- a/src/main/java/org/apache/hadoop/hbase/KeyValue.java
++++ b/src/main/java/org/apache/hadoop/hbase/KeyValue.java
+@@ -955,6 +955,15 @@ public class KeyValue implements Writable, HeapSize {
+   }
+ 
+   /**
++   * @return True if this is a "fake" KV created for internal seeking purposes,
++   * which should not be seen by user code
++   */
++  public boolean isInternal() {
++    byte type = getType();
++    return type == Type.Minimum.code || type == Type.Maximum.code;
++  }
++
++  /**
+    * @param now Time to set into <code>this</code> IFF timestamp ==
+    * {@link HConstants#LATEST_TIMESTAMP} (else, its a noop).
+    * @return True is we modified this.
+diff --git a/src/main/java/org/apache/hadoop/hbase/coprocessor/BaseRegionObserver.java b/src/main/java/org/apache/hadoop/hbase/coprocessor/BaseRegionObserver.java
+index 93e53c3..b3164e2 100644
+--- a/src/main/java/org/apache/hadoop/hbase/coprocessor/BaseRegionObserver.java
++++ b/src/main/java/org/apache/hadoop/hbase/coprocessor/BaseRegionObserver.java
+@@ -18,6 +18,7 @@ package org.apache.hadoop.hbase.coprocessor;
+ 
+ import java.util.List;
+ import java.util.Map;
++import java.util.NavigableSet;
+ 
+ import com.google.common.collect.ImmutableList;
+ import org.apache.hadoop.hbase.CoprocessorEnvironment;
+@@ -34,6 +35,7 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
+ import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.InternalScanner;
++import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
+ import org.apache.hadoop.hbase.regionserver.RegionScanner;
+ import org.apache.hadoop.hbase.regionserver.Store;
+ import org.apache.hadoop.hbase.regionserver.StoreFile;
+@@ -286,4 +288,12 @@ public abstract class BaseRegionObserver implements RegionObserver {
+     List<Pair<byte[], String>> familyPaths, boolean hasLoaded) throws IOException {
+     return hasLoaded;
+   }
++  
++  @Override
++  public KeyValueScanner preStoreScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c,
++      final Store store, final Scan scan, final NavigableSet<byte[]> targetCols,
++      final KeyValueScanner s) throws IOException {
++    return null;
++  }
++
+ }
+diff --git a/src/main/java/org/apache/hadoop/hbase/coprocessor/RegionObserver.java b/src/main/java/org/apache/hadoop/hbase/coprocessor/RegionObserver.java
+index 889c4af..c574f63 100644
+--- a/src/main/java/org/apache/hadoop/hbase/coprocessor/RegionObserver.java
++++ b/src/main/java/org/apache/hadoop/hbase/coprocessor/RegionObserver.java
+@@ -18,6 +18,7 @@ package org.apache.hadoop.hbase.coprocessor;
+ 
+ import java.io.IOException;
+ import java.util.List;
++import java.util.NavigableSet;
+ 
+ import org.apache.hadoop.hbase.Coprocessor;
+ import org.apache.hadoop.hbase.HRegionInfo;
+@@ -33,6 +34,7 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
+ import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.regionserver.InternalScanner;
++import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
+ import org.apache.hadoop.hbase.regionserver.RegionScanner;
+ import org.apache.hadoop.hbase.regionserver.Store;
+ import org.apache.hadoop.hbase.regionserver.StoreFile;
+@@ -677,4 +679,29 @@ public interface RegionObserver extends Coprocessor {
+    */
+   boolean postBulkLoadHFile(final ObserverContext<RegionCoprocessorEnvironment> ctx,
+     List<Pair<byte[], String>> familyPaths, boolean hasLoaded) throws IOException;
++  
++  /**
++   * Called before a store opens a new scanner.
++   * This hook is called when a "user" scanner is opened.
++   * <p>
++   * See {@link #preFlushScannerOpen(ObserverContext, Store, KeyValueScanner, InternalScanner)}
++   * and {@link #preCompactScannerOpen(ObserverContext, Store, List, ScanType, long, InternalScanner)}
++   * to override scanners created for flushes or compactions, resp.
++   * <p>
++   * Call CoprocessorEnvironment#complete to skip any subsequent chained
++   * coprocessors.
++   * Calling {@link org.apache.hadoop.hbase.coprocessor.ObserverContext#bypass()} has no
++   * effect in this hook.
++   * @param c the environment provided by the region server
++   * @param store the store being scanned
++   * @param scan the Scan specification
++   * @param targetCols columns to be used in the scanner
++   * @param s the base scanner, if not {@code null}, from previous RegionObserver in the chain
++   * @return a KeyValueScanner instance to use or {@code null} to use the default implementation
++   * @throws IOException if an error occurred on the coprocessor
++   */
++  KeyValueScanner preStoreScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c,
++      final Store store, final Scan scan, final NavigableSet<byte[]> targetCols,
++      final KeyValueScanner s) throws IOException;
++
+ }
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/Filter.java b/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
+index 02ea5f5..832020b 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
+@@ -139,7 +139,7 @@ public interface Filter extends Writable {
+   public void filterRow(List<KeyValue> kvs);
+ 
+   /**
+-   * @return True if this filter actively uses filterRow(List).
++   * @return True if this filter actively uses filterRow(List) and filterRow().
+    * Primarily used to check for conflicts with scans(such as scans
+    * that do not read a full row at a time)
+    */
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/FilterWrapper.java b/src/main/java/org/apache/hadoop/hbase/filter/FilterWrapper.java
+new file mode 100644
+index 0000000..0d027e0
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/filter/FilterWrapper.java
+@@ -0,0 +1,125 @@
++/*
++ * Copyright The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.filter;
++
++import java.io.DataInput;
++import java.io.DataOutput;
++import java.io.IOException;
++import java.util.List;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.hbase.KeyValue;
++import org.apache.hadoop.hbase.regionserver.RegionCoprocessorHost;
++
++/**
++ * This is a Filter wrapper class which is used in the server side. Some filter
++ * related hooks can be defined in this wrapper. The only way to create a
++ * FilterWrapper instance is passing a client side Filter instance.
++ *
++ */
++public class FilterWrapper implements Filter {
++  private static final Log LOG = LogFactory.getLog(FilterWrapper.class);
++  Filter filter = null;
++
++  public Filter getFilterInstance() {
++    return this.filter;
++  }
++
++  public FilterWrapper( Filter filter ) {
++    if (null == filter) {
++      // ensure the filter instance is not null
++      throw new NullPointerException("Cannot create FilterWrapper with null");
++    }
++
++    if (filter instanceof FilterWrapper) {
++      // copy constructor
++      this.filter = ( (FilterWrapper) filter ).getFilterInstance();
++    } else {
++      this.filter = filter;
++    }
++  }
++
++  @Override
++  public void write(DataOutput out) throws IOException {
++    this.filter.write(out);
++  }
++
++  @Override
++  public void readFields(DataInput in) throws IOException {
++    this.filter.readFields(in);
++  }
++
++  @Override
++  public void reset() {
++    this.filter.reset();
++  }
++
++  @Override
++  public boolean filterAllRemaining() {
++    // TODO add co-processor supporting if necessary
++    return this.filter.filterAllRemaining();
++  }
++
++  @Override
++  public boolean filterRow() {
++    return this.filter.filterRow();
++  }
++
++  @Override
++  public boolean hasFilterRow() {
++    // TODO add co-processor supporting if necessary
++    return this.filter.hasFilterRow();
++  }
++
++  @Override
++  public KeyValue getNextKeyHint(KeyValue raw) {
++    return this.filter.getNextKeyHint(raw);
++   }
++
++  @Override
++  public boolean filterRowKey(byte[] buffer, int offset, int length) {
++    return this.filter.filterRowKey(buffer, offset, length);
++  }
++
++  @Override
++  public ReturnCode filterKeyValue(KeyValue v) {
++    return this.filter.filterKeyValue(v);
++  }
++
++  @Override
++  public KeyValue transform(KeyValue raw) {
++    return this.filter.transform(raw);
++  }
++
++  @Override
++  public void filterRow(List<KeyValue> kvs) {
++    //To fix HBASE-6429,
++    //Filter with filterRow() returning true is incompatible with scan with limit
++    //1. hasFilterRow() returns true, if either filterRow() or filterRow(kvs) is implemented.
++    //2. filterRow() is merged with filterRow(kvs),
++    //so that to make all those row related filtering stuff in the same function.
++    this.filter.filterRow(kvs);
++    if (!kvs.isEmpty() && this.filter.filterRow()) {
++      kvs.clear();
++    }
++  }
++
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/PageFilter.java b/src/main/java/org/apache/hadoop/hbase/filter/PageFilter.java
+index b00205a..846f337 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/PageFilter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/PageFilter.java
+@@ -74,6 +74,10 @@ public class PageFilter extends FilterBase {
+     return this.rowsAccepted > this.pageSize;
+   }
+ 
++  public boolean hasFilterRow() {
++    return true;
++  }
++
+   public static Filter createFilterFromArguments(ArrayList<byte []> filterArguments) {
+     Preconditions.checkArgument(filterArguments.size() == 1,
+                                 "Expected 1 but got: %s", filterArguments.size());
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/RandomRowFilter.java b/src/main/java/org/apache/hadoop/hbase/filter/RandomRowFilter.java
+index c23ac9b..c8f1e4f 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/RandomRowFilter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/RandomRowFilter.java
+@@ -86,6 +86,10 @@ public class RandomRowFilter extends FilterBase {
+     return filterOutRow;
+   }
+ 
++  public boolean hasFilterRow() {
++    return true;
++  }
++
+   @Override
+   public boolean filterRowKey(byte[] buffer, int offset, int length) {
+     if (chance < 0) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java b/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
+index f6e0cb7..473a3c6 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
+@@ -193,6 +193,12 @@ public class SingleColumnValueFilter extends FilterBase {
+     }
+   }
+ 
++
++  public boolean hasFilterRow(){
++    //return true since either filterRow() or filterRow(List kvs) is defined
++    return true;
++  }
++
+   public boolean filterRow() {
+     // If column was found, return false if it was matched, true if it was not
+     // If column not found, return true if we filter if missing, false if not
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/SkipFilter.java b/src/main/java/org/apache/hadoop/hbase/filter/SkipFilter.java
+index 57fa991..89c8a26 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/SkipFilter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/SkipFilter.java
+@@ -85,6 +85,10 @@ public class SkipFilter extends FilterBase {
+     return filterRow;
+   }
+ 
++  public boolean hasFilterRow() {
++    return true;
++  }
++
+   public void write(DataOutput out) throws IOException {
+     out.writeUTF(this.filter.getClass().getName());
+     this.filter.write(out);
+diff --git a/src/main/java/org/apache/hadoop/hbase/filter/WhileMatchFilter.java b/src/main/java/org/apache/hadoop/hbase/filter/WhileMatchFilter.java
+index 242e0bd..d6b5486 100644
+--- a/src/main/java/org/apache/hadoop/hbase/filter/WhileMatchFilter.java
++++ b/src/main/java/org/apache/hadoop/hbase/filter/WhileMatchFilter.java
+@@ -86,6 +86,10 @@ public class WhileMatchFilter extends FilterBase {
+     return filterRow;
+   }
+ 
++  public boolean hasFilterRow() {
++    return true;
++  }
++
+   public void write(DataOutput out) throws IOException {
+     out.writeUTF(this.filter.getClass().getName());
+     this.filter.write(out);
+diff --git a/src/main/java/org/apache/hadoop/hbase/io/hfile/BlockWithScanInfo.java b/src/main/java/org/apache/hadoop/hbase/io/hfile/BlockWithScanInfo.java
+new file mode 100644
+index 0000000..ceb05e3
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/io/hfile/BlockWithScanInfo.java
+@@ -0,0 +1,44 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.io.hfile;
++
++/**
++ * BlockWithScanInfo is wrapper class for HFileBlock with other attributes. These attributes are
++ * supposed to be much cheaper to be maintained in each caller thread than in HFileBlock itself.
++ */
++public class BlockWithScanInfo {
++  private final HFileBlock hFileBlock;
++  /**
++   * The first key in the next block following this one in the HFile.
++   * If this key is unknown, this is reference-equal with HConstants.NO_NEXT_INDEXED_KEY
++   */
++  private final byte[] nextIndexedKey;
++
++  public BlockWithScanInfo(HFileBlock hFileBlock, byte[] nextIndexedKey) {
++    this.hFileBlock = hFileBlock;
++    this.nextIndexedKey = nextIndexedKey;
++  }
++
++  public HFileBlock getHFileBlock() {
++    return hFileBlock;
++  }
++
++  public byte[] getNextIndexedKey() {
++    return nextIndexedKey;
++  }
++}
+diff --git a/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlockIndex.java b/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlockIndex.java
+index 576c988..d53c2f8 100644
+--- a/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlockIndex.java
++++ b/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlockIndex.java
+@@ -36,6 +36,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.fs.FSDataOutputStream;
++import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.KeyValue;
+ import org.apache.hadoop.hbase.io.HeapSize;
+ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
+@@ -176,16 +177,56 @@ public class HFileBlockIndex {
+         int keyLength, HFileBlock currentBlock, boolean cacheBlocks,
+         boolean pread, boolean isCompaction)
+         throws IOException {
++      BlockWithScanInfo blockWithScanInfo = loadDataBlockWithScanInfo(key, keyOffset, keyLength,
++          currentBlock, cacheBlocks, pread, isCompaction);
++      if (blockWithScanInfo == null) {
++        return null;
++      } else {
++        return blockWithScanInfo.getHFileBlock();
++      }
++    }
++
++    /**
++     * Return the BlockWithScanInfo which contains the DataBlock with other scan info
++     * such as nextIndexedKey.
++     * This function will only be called when the HFile version is larger than 1.
++     *
++     * @param key the key we are looking for
++     * @param keyOffset the offset of the key in its byte array
++     * @param keyLength the length of the key
++     * @param currentBlock the current block, to avoid re-reading the same
++     *          block
++     * @param cacheBlocks
++     * @param pread
++     * @param isCompaction
++     * @return the BlockWithScanInfo which contains the DataBlock with other scan info
++     *         such as nextIndexedKey.
++     * @throws IOException
++     */
++    public BlockWithScanInfo loadDataBlockWithScanInfo(final byte[] key, int keyOffset,
++        int keyLength, HFileBlock currentBlock, boolean cacheBlocks,
++        boolean pread, boolean isCompaction)
++        throws IOException {
+       int rootLevelIndex = rootBlockContainingKey(key, keyOffset, keyLength);
+       if (rootLevelIndex < 0 || rootLevelIndex >= blockOffsets.length) {
+         return null;
+       }
+ 
++      // the next indexed key
++      byte[] nextIndexedKey = null;
++
+       // Read the next-level (intermediate or leaf) index block.
+       long currentOffset = blockOffsets[rootLevelIndex];
+       int currentOnDiskSize = blockDataSizes[rootLevelIndex];
+ 
++      if (rootLevelIndex < blockKeys.length - 1) {
++        nextIndexedKey = blockKeys[rootLevelIndex + 1];
++      } else {
++        nextIndexedKey = HConstants.NO_NEXT_INDEXED_KEY;
++      }
++
+       int lookupLevel = 1; // How many levels deep we are in our lookup.
++      int index = -1;
+ 
+       HFileBlock block;
+       while (true) {
+@@ -236,8 +277,8 @@ public class HFileBlockIndex {
+         // Locate the entry corresponding to the given key in the non-root
+         // (leaf or intermediate-level) index block.
+         ByteBuffer buffer = block.getBufferWithoutHeader();
+-        if (!locateNonRootIndexEntry(buffer, key, keyOffset, keyLength,
+-            comparator)) {
++        index = locateNonRootIndexEntry(buffer, key, keyOffset, keyLength, comparator);
++        if (index == -1) {
+           throw new IOException("The key "
+               + Bytes.toStringBinary(key, keyOffset, keyLength)
+               + " is before the" + " first key of the non-root index block "
+@@ -246,6 +287,12 @@ public class HFileBlockIndex {
+ 
+         currentOffset = buffer.getLong();
+         currentOnDiskSize = buffer.getInt();
++
++        // Only update next indexed key if there is a next indexed key in the current level
++        byte[] tmpNextIndexedKey = getNonRootIndexedKey(buffer, index + 1);
++        if (tmpNextIndexedKey != null) {
++          nextIndexedKey = tmpNextIndexedKey;
++        }
+       }
+ 
+       if (lookupLevel != searchTreeLevel) {
+@@ -253,7 +300,9 @@ public class HFileBlockIndex {
+             " but the number of levels is " + searchTreeLevel);
+       }
+ 
+-      return block;
++      // set the next indexed key for the current block.
++      BlockWithScanInfo blockWithScanInfo = new BlockWithScanInfo(block, nextIndexedKey);
++      return blockWithScanInfo;
+     }
+ 
+     /**
+@@ -379,6 +428,41 @@ public class HFileBlockIndex {
+     }
+ 
+     /**
++     * The indexed key at the ith position in the nonRootIndex. The position starts at 0.
++     * @param nonRootIndex
++     * @param i the ith position
++     * @return The indexed key at the ith position in the nonRootIndex.
++     */
++    private byte[] getNonRootIndexedKey(ByteBuffer nonRootIndex, int i) {
++      int numEntries = nonRootIndex.getInt(0);
++      if (i < 0 || i >= numEntries) {
++        return null;
++      }
++
++      // Entries start after the number of entries and the secondary index.
++      // The secondary index takes numEntries + 1 ints.
++      int entriesOffset = Bytes.SIZEOF_INT * (numEntries + 2);
++      // Targetkey's offset relative to the end of secondary index
++      int targetKeyRelOffset = nonRootIndex.getInt(
++          Bytes.SIZEOF_INT * (i + 1));
++
++      // The offset of the target key in the blockIndex buffer
++      int targetKeyOffset = entriesOffset     // Skip secondary index
++          + targetKeyRelOffset               // Skip all entries until mid
++          + SECONDARY_INDEX_ENTRY_OVERHEAD;  // Skip offset and on-disk-size
++
++      // We subtract the two consecutive secondary index elements, which
++      // gives us the size of the whole (offset, onDiskSize, key) tuple. We
++      // then need to subtract the overhead of offset and onDiskSize.
++      int targetKeyLength = nonRootIndex.getInt(Bytes.SIZEOF_INT * (i + 2)) -
++        targetKeyRelOffset - SECONDARY_INDEX_ENTRY_OVERHEAD;
++
++      int from = nonRootIndex.arrayOffset() + targetKeyOffset;
++      int to = from + targetKeyLength;
++      return Arrays.copyOfRange(nonRootIndex.array(), from, to);
++    }
++
++    /**
+      * Performs a binary search over a non-root level index block. Utilizes the
+      * secondary index, which records the offsets of (offset, onDiskSize,
+      * firstKey) tuples of all entries.
+@@ -478,31 +562,30 @@ public class HFileBlockIndex {
+      * @param key the byte array containing the key
+      * @param keyOffset the offset of the key in its byte array
+      * @param keyLength the length of the key
+-     * @return true in the case the index entry containing the given key was
+-     *         found, false in the case the given key is before the first key
++     * @return the index position where the given key was found,
++     *         otherwise return -1 in the case the given key is before the first key.
+      *
+      */
+-    static boolean locateNonRootIndexEntry(ByteBuffer nonRootBlock, byte[] key,
++    static int locateNonRootIndexEntry(ByteBuffer nonRootBlock, byte[] key,
+         int keyOffset, int keyLength, RawComparator<byte[]> comparator) {
+       int entryIndex = binarySearchNonRootIndex(key, keyOffset, keyLength,
+           nonRootBlock, comparator);
+ 
+-      if (entryIndex == -1) {
+-        return false;
+-      }
++      if (entryIndex != -1) {
++        int numEntries = nonRootBlock.getInt(0);
+ 
+-      int numEntries = nonRootBlock.getInt(0);
++        // The end of secondary index and the beginning of entries themselves.
++        int entriesOffset = Bytes.SIZEOF_INT * (numEntries + 2);
+ 
+-      // The end of secondary index and the beginning of entries themselves.
+-      int entriesOffset = Bytes.SIZEOF_INT * (numEntries + 2);
++        // The offset of the entry we are interested in relative to the end of
++        // the secondary index.
++        int entryRelOffset = nonRootBlock.getInt(Bytes.SIZEOF_INT
++            * (1 + entryIndex));
+ 
+-      // The offset of the entry we are interested in relative to the end of
+-      // the secondary index.
+-      int entryRelOffset = nonRootBlock.getInt(Bytes.SIZEOF_INT
+-          * (1 + entryIndex));
++        nonRootBlock.position(entriesOffset + entryRelOffset);
++      }
+ 
+-      nonRootBlock.position(entriesOffset + entryRelOffset);
+-      return true;
++      return entryIndex;
+     }
+ 
+     /**
+diff --git a/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileReaderV2.java b/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileReaderV2.java
+index 1f777cb..e9bdd01 100644
+--- a/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileReaderV2.java
++++ b/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileReaderV2.java
+@@ -29,6 +29,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.fs.FSDataInputStream;
+ import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.KeyValue;
+ import org.apache.hadoop.hbase.fs.HFileSystem;
+ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoder;
+@@ -429,6 +430,15 @@ public class HFileReaderV2 extends AbstractHFileReader {
+       extends AbstractHFileReader.Scanner {
+     protected HFileBlock block;
+ 
++    /**
++     * The next indexed key is to keep track of the indexed key of the next data block.
++     * If the nextIndexedKey is HConstants.NO_NEXT_INDEXED_KEY, it means that the
++     * current data block is the last data block.
++     *
++     * If the nextIndexedKey is null, it means the nextIndexedKey has not been loaded yet.
++     */
++    protected byte[] nextIndexedKey;
++
+     public AbstractScannerV2(HFileReaderV2 r, boolean cacheBlocks,
+         final boolean pread, final boolean isCompaction) {
+       super(r, cacheBlocks, pread, isCompaction);
+@@ -452,19 +462,20 @@ public class HFileReaderV2 extends AbstractHFileReader {
+         throws IOException {
+       HFileBlockIndex.BlockIndexReader indexReader =
+           reader.getDataBlockIndexReader();
+-      HFileBlock seekToBlock = indexReader.seekToDataBlock(key, offset, length,
+-          block, cacheBlocks, pread, isCompaction);
+-      if (seekToBlock == null) {
++      BlockWithScanInfo blockWithScanInfo =
++        indexReader.loadDataBlockWithScanInfo(key, offset, length, block,
++            cacheBlocks, pread, isCompaction);
++      if (blockWithScanInfo == null || blockWithScanInfo.getHFileBlock() == null) {
+         // This happens if the key e.g. falls before the beginning of the file.
+         return -1;
+       }
+-      return loadBlockAndSeekToKey(seekToBlock, rewind, key, offset, length,
+-          false);
++      return loadBlockAndSeekToKey(blockWithScanInfo.getHFileBlock(),
++          blockWithScanInfo.getNextIndexedKey(), rewind, key, offset, length, false);
+     }
+ 
+     protected abstract ByteBuffer getFirstKeyInBlock(HFileBlock curBlock);
+ 
+-    protected abstract int loadBlockAndSeekToKey(HFileBlock seekToBlock,
++    protected abstract int loadBlockAndSeekToKey(HFileBlock seekToBlock, byte[] nextIndexedKey,
+         boolean rewind, byte[] key, int offset, int length, boolean seekBefore)
+         throws IOException;
+ 
+@@ -477,17 +488,28 @@ public class HFileReaderV2 extends AbstractHFileReader {
+ 
+     @Override
+     public int reseekTo(byte[] key, int offset, int length) throws IOException {
++      int compared;
+       if (isSeeked()) {
+         ByteBuffer bb = getKey();
+-        int compared = reader.getComparator().compare(key, offset,
++        compared = reader.getComparator().compare(key, offset,
+             length, bb.array(), bb.arrayOffset(), bb.limit());
+         if (compared < 1) {
+           // If the required key is less than or equal to current key, then
+           // don't do anything.
+           return compared;
++        } else {
++          if (this.nextIndexedKey != null &&
++              (this.nextIndexedKey == HConstants.NO_NEXT_INDEXED_KEY ||
++               reader.getComparator().compare(key, offset, length,
++                   nextIndexedKey, 0, nextIndexedKey.length) < 0)) {
++            // The reader shall continue to scan the current data block instead of querying the
++            // block index as long as it knows the target key is strictly smaller than
++            // the next indexed key or the current data block is the last data block.
++            return loadBlockAndSeekToKey(this.block, this.nextIndexedKey,
++                false, key, offset, length, false);
++          }
+         }
+       }
+-
+       // Don't rewind on a reseek operation, because reseek implies that we are
+       // always going forward in the file.
+       return seekTo(key, offset, length, false);
+@@ -503,6 +525,7 @@ public class HFileReaderV2 extends AbstractHFileReader {
+         return false;
+       }
+       ByteBuffer firstKey = getFirstKeyInBlock(seekToBlock);
++
+       if (reader.getComparator().compare(firstKey.array(),
+           firstKey.arrayOffset(), firstKey.limit(), key, offset, length) == 0)
+       {
+@@ -519,11 +542,11 @@ public class HFileReaderV2 extends AbstractHFileReader {
+         seekToBlock = reader.readBlock(previousBlockOffset,
+             seekToBlock.getOffset() - previousBlockOffset, cacheBlocks,
+             pread, isCompaction, BlockType.DATA);
+-
+         // TODO shortcut: seek forward in this block to the last key of the
+         // block.
+       }
+-      loadBlockAndSeekToKey(seekToBlock, true, key, offset, length, true);
++      byte[] firstKeyInCurrentBlock = Bytes.getBytes(firstKey);
++      loadBlockAndSeekToKey(seekToBlock, firstKeyInCurrentBlock, true, key, offset, length, true);
+       return true;
+     }
+ 
+@@ -699,14 +722,17 @@ public class HFileReaderV2 extends AbstractHFileReader {
+     }
+ 
+     @Override
+-    protected int loadBlockAndSeekToKey(HFileBlock seekToBlock, boolean rewind,
+-        byte[] key, int offset, int length, boolean seekBefore)
++    protected int loadBlockAndSeekToKey(HFileBlock seekToBlock, byte[] nextIndexedKey,
++        boolean rewind, byte[] key, int offset, int length, boolean seekBefore)
+         throws IOException {
+       if (block == null || block.getOffset() != seekToBlock.getOffset()) {
+         updateCurrBlock(seekToBlock);
+       } else if (rewind) {
+         blockBuffer.rewind();
+       }
++
++      // Update the nextIndexedKey
++      this.nextIndexedKey = nextIndexedKey;
+       return blockSeek(key, offset, length, seekBefore);
+     }
+ 
+@@ -731,6 +757,9 @@ public class HFileReaderV2 extends AbstractHFileReader {
+       blockBuffer = block.getBufferWithoutHeader();
+       readKeyValueLen();
+       blockFetches++;
++
++      // Reset the next indexed key
++      this.nextIndexedKey = null;
+     }
+ 
+     private final void readKeyValueLen() {
+@@ -1016,14 +1045,15 @@ public class HFileReaderV2 extends AbstractHFileReader {
+     }
+ 
+     @Override
+-    protected int loadBlockAndSeekToKey(HFileBlock seekToBlock, boolean rewind,
+-        byte[] key, int offset, int length, boolean seekBefore)
++    protected int loadBlockAndSeekToKey(HFileBlock seekToBlock, byte[] nextIndexedKey,
++        boolean rewind, byte[] key, int offset, int length, boolean seekBefore)
+         throws IOException  {
+       if (block == null || block.getOffset() != seekToBlock.getOffset()) {
+         updateCurrentBlock(seekToBlock);
+       } else if (rewind) {
+         seeker.rewind();
+       }
++      this.nextIndexedKey = nextIndexedKey;
+       return seeker.seekToKeyInBlock(key, offset, length, seekBefore);
+     }
+   }
+diff --git a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
+index d2962ee..3ad53f9 100644
+--- a/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
++++ b/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat.java
+@@ -50,6 +50,7 @@ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
+ import org.apache.hadoop.hbase.io.hfile.CacheConfig;
+ import org.apache.hadoop.hbase.io.hfile.Compression;
+ import org.apache.hadoop.hbase.io.hfile.HFile;
++import org.apache.hadoop.hbase.mapreduce.hadoopbackport.TotalOrderPartitioner;
+ import org.apache.hadoop.hbase.io.hfile.HFileDataBlockEncoder;
+ import org.apache.hadoop.hbase.io.hfile.HFileDataBlockEncoderImpl;
+ import org.apache.hadoop.hbase.io.hfile.NoOpDataBlockEncoder;
+@@ -59,6 +60,7 @@ import org.apache.hadoop.hbase.regionserver.TimeRangeTracker;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.io.NullWritable;
+ import org.apache.hadoop.io.SequenceFile;
++import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableUtils;
+ import org.apache.hadoop.mapreduce.Job;
+ import org.apache.hadoop.mapreduce.Partitioner;
+@@ -337,19 +339,45 @@ public class HFileOutputFormat extends FileOutputFormat<ImmutableBytesWritable,
+       LOG.warn("Unknown map output value type:" + job.getMapOutputValueClass());
+     }
+ 
+-    LOG.info("Looking up current regions for table " + table);
+-    List<ImmutableBytesWritable> startKeys = getRegionStartKeys(table);
+-    LOG.info("Configuring " + startKeys.size() + " reduce partitions " +
+-        "to match current region count");
+-    job.setNumReduceTasks(startKeys.size());
++    Path partitionsPath = new Path(TotalOrderPartitioner.getPartitionFile(conf));
++    FileSystem fs = partitionsPath.getFileSystem(conf);
++    boolean createPartitionFile = true;
+ 
+-    Path partitionsPath = new Path(job.getWorkingDirectory(),
+-                                   "partitions_" + UUID.randomUUID());
+-    LOG.info("Writing partition information to " + partitionsPath);
++    if(fs.exists(partitionsPath)) {
++      SequenceFile.Reader reader = new SequenceFile.Reader(fs, partitionsPath, conf);
++      Writable key;
++      int count = 1;
++      try {
++        key = (Writable) reader.getKeyClass().newInstance();
++        while(reader.next(key)){
++          count++;
++        }
++      } catch (Exception e) {
++        // TODO Auto-generated catch block
++        e.printStackTrace();
++        createPartitionFile = true;
++      }
++      createPartitionFile = false;
++      job.setNumReduceTasks(count);
++    }
+ 
+-    FileSystem fs = partitionsPath.getFileSystem(conf);
+-    writePartitions(conf, partitionsPath, startKeys);
+-    partitionsPath.makeQualified(fs);
++    if (createPartitionFile) {
++      LOG.info("Looking up current regions for table " + table);
++      List<ImmutableBytesWritable> startKeys = getRegionStartKeys(table);
++      LOG.info("Configuring " + startKeys.size() + " reduce partitions "
++          + "to match current region count");
++      job.setNumReduceTasks(startKeys.size());
++
++      partitionsPath = new Path(job.getWorkingDirectory(), "partitions_"
++          + UUID.randomUUID());
++      LOG.info("Writing partition information to " + partitionsPath);
++
++      fs = partitionsPath.getFileSystem(conf);
++
++      writePartitions(conf, partitionsPath, startKeys);
++
++      partitionsPath.makeQualified(fs);
++    }
+ 
+     URI cacheUri;
+     try {
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index 024adb2..8b33ee4 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -94,6 +94,7 @@ import org.apache.hadoop.hbase.client.coprocessor.Exec;
+ import org.apache.hadoop.hbase.client.coprocessor.ExecResult;
+ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
+ import org.apache.hadoop.hbase.filter.Filter;
++import org.apache.hadoop.hbase.filter.FilterWrapper;
+ import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
+ import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
+ import org.apache.hadoop.hbase.io.HeapSize;
+@@ -1605,6 +1606,11 @@ public class HRegion implements HeapSize { // , Writable{
+         scan.addFamily(family);
+       }
+     }
++    // set the instance of FilterWrapper in the server side
++    if (scan.hasFilter() && !(scan.getFilter() instanceof FilterWrapper)) {
++      FilterWrapper filter = new FilterWrapper(scan.getFilter());
++      scan.setFilter(filter);
++    }
+   }
+ 
+   protected RegionScanner getScanner(Scan scan,
+@@ -3367,7 +3373,7 @@ public class HRegion implements HeapSize { // , Writable{
+       for (Map.Entry<byte[], NavigableSet<byte[]>> entry :
+           scan.getFamilyMap().entrySet()) {
+         Store store = stores.get(entry.getKey());
+-        StoreScanner scanner = store.getScanner(scan, entry.getValue());
++        KeyValueScanner scanner = store.getScanner(scan, entry.getValue());
+         scanners.add(scanner);
+       }
+       this.storeHeap = new KeyValueHeap(scanners, comparator);
+@@ -3441,7 +3447,7 @@ public class HRegion implements HeapSize { // , Writable{
+           rpcCall.throwExceptionIfCallerDisconnected();
+         }
+ 
+-        byte [] currentRow = peekRow();
++        byte [] currentRow = this.peekRow();
+         if (isStopRow(currentRow)) {
+           if (filter != null && filter.hasFilterRow()) {
+             filter.filterRow(results);
+@@ -3460,7 +3466,7 @@ public class HRegion implements HeapSize { // , Writable{
+             if (limit > 0 && results.size() == limit) {
+               if (this.filter != null && filter.hasFilterRow()) {
+                 throw new IncompatibleFilterException(
+-                  "Filter with filterRow(List<KeyValue>) incompatible with scan with limit!");
++                  "filterRow is incompatible with scan with limit!");
+               }
+               return true; // we are expecting more yes, but also limited to how many we can return.
+             }
+@@ -3475,7 +3481,7 @@ public class HRegion implements HeapSize { // , Writable{
+             filter.filterRow(results);
+           }
+ 
+-          if (results.isEmpty() || filterRow()) {
++          if (results.isEmpty()) {
+             // this seems like a redundant step - we already consumed the row
+             // there're no left overs.
+             // the reasons for calling this method are:
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/RegionCoprocessorHost.java b/src/main/java/org/apache/hadoop/hbase/regionserver/RegionCoprocessorHost.java
+index 58afaf4..c59062e 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/RegionCoprocessorHost.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/RegionCoprocessorHost.java
+@@ -36,6 +36,8 @@ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.client.*;
+ import org.apache.hadoop.hbase.coprocessor.*;
+ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
++import org.apache.hadoop.hbase.filter.Filter;
++import org.apache.hadoop.hbase.filter.Filter.ReturnCode;
+ import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
+ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+ import org.apache.hadoop.hbase.ipc.CoprocessorProtocol;
+@@ -154,7 +156,7 @@ public class RegionCoprocessorHost
+             }
+             if (cfgSpec != null) {
+               cfgSpec = cfgSpec.substring(cfgSpec.indexOf('|') + 1);
+-              Configuration newConf = HBaseConfiguration.create(conf);
++              Configuration newConf = new Configuration(conf);
+               Matcher m = HConstants.CP_HTD_ATTR_VALUE_PARAM_PATTERN.matcher(cfgSpec);
+               while (m.find()) {
+                 newConf.set(m.group(1), m.group(2));
+@@ -1114,6 +1116,31 @@ public class RegionCoprocessorHost
+   }
+ 
+   /**
++   * See
++   * {@link RegionObserver#preStoreScannerOpen(ObserverContext, Store, Scan, NavigableSet, KeyValueScanner)}
++   */
++  public KeyValueScanner preStoreScannerOpen(Store store, Scan scan,
++      final NavigableSet<byte[]> targetCols) throws IOException {
++    KeyValueScanner s = null;
++    ObserverContext<RegionCoprocessorEnvironment> ctx = null;
++    for (RegionEnvironment env: coprocessors) {
++      if (env.getInstance() instanceof RegionObserver) {
++        ctx = ObserverContext.createAndPrepare(env, ctx);
++        try {
++          s = ((RegionObserver) env.getInstance()).preStoreScannerOpen(ctx, store, scan,
++              targetCols, s);
++        } catch (Throwable e) {
++          handleCoprocessorThrowable(env, e);
++        }
++        if (ctx.shouldComplete()) {
++          break;
++        }
++      }
++    }
++    return s;
++  }
++  
++  /**
+    * @param s the scanner
+    * @param results the result set returned by the region server
+    * @param limit the maximum number of results to return
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+index 68219b9..4784030 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/Store.java
+@@ -2036,11 +2036,18 @@ public class Store extends SchemaConfigured implements HeapSize {
+    * are not in a compaction.
+    * @throws IOException
+    */
+-  public StoreScanner getScanner(Scan scan,
++  public KeyValueScanner getScanner(Scan scan,
+       final NavigableSet<byte []> targetCols) throws IOException {
+     lock.readLock().lock();
+     try {
+-      return new StoreScanner(this, scan, targetCols);
++      KeyValueScanner scanner = null;
++      if (getHRegion().getCoprocessorHost() != null) {
++        scanner = getHRegion().getCoprocessorHost().preStoreScannerOpen(this, scan, targetCols);
++      }
++      if (scanner == null) {
++        scanner = new StoreScanner(this, scan, targetCols);
++      }
++      return scanner;
+     } finally {
+       lock.readLock().unlock();
+     }
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/StoreScanner.java b/src/main/java/org/apache/hadoop/hbase/regionserver/StoreScanner.java
+index 1bc9d42..8236d57 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/StoreScanner.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/StoreScanner.java
+@@ -333,96 +333,90 @@ class StoreScanner extends NonLazyKeyValueScanner
+ 
+     KeyValue kv;
+     KeyValue prevKV = null;
+-    List<KeyValue> results = new ArrayList<KeyValue>();
+ 
+     // Only do a sanity-check if store and comparator are available.
+     KeyValue.KVComparator comparator =
+-        store != null ? store.getComparator() : null;
+-
+-    LOOP: while((kv = this.heap.peek()) != null) {
+-      // Check that the heap gives us KVs in an increasing order.
+-      if (prevKV != null && comparator != null
+-          && comparator.compare(prevKV, kv) > 0) {
+-        throw new IOException("Key " + prevKV + " followed by a " +
+-            "smaller key " + kv + " in cf " + store);
+-      }
+-      prevKV = kv;
+-      ScanQueryMatcher.MatchCode qcode = matcher.match(kv);
+-      switch(qcode) {
+-        case INCLUDE:
+-        case INCLUDE_AND_SEEK_NEXT_ROW:
+-        case INCLUDE_AND_SEEK_NEXT_COL:
++      store != null ? store.getComparator() : null;
++
++    long cumulativeMetric = 0;
++    int count = 0;
++    try {
++      LOOP: while((kv = this.heap.peek()) != null) {
++        // Check that the heap gives us KVs in an increasing order.
++        assert prevKV == null || comparator == null || comparator.compare(prevKV, kv) <= 0 :
++          "Key " + prevKV + " followed by a " + "smaller key " + kv + " in cf " + store;
++        prevKV = kv;
++        ScanQueryMatcher.MatchCode qcode = matcher.match(kv);
++        switch(qcode) {
++          case INCLUDE:
++          case INCLUDE_AND_SEEK_NEXT_ROW:
++          case INCLUDE_AND_SEEK_NEXT_COL:
++
++            Filter f = matcher.getFilter();
++            outResult.add(f == null ? kv : f.transform(kv));
++            count++;
++            
++            if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_ROW) {
++              if (!matcher.moreRowsMayExistAfter(kv)) {
++                return false;
++              }
++              reseek(matcher.getKeyForNextRow(kv));
++            } else if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_COL) {
++              reseek(matcher.getKeyForNextColumn(kv));
++            } else {
++              this.heap.next();
++            }
++
++            cumulativeMetric += kv.getLength();
++            if (limit > 0 && (count == limit)) {
++              break LOOP;
++            }
++            continue;
++
++          case DONE:
++            return true;
+ 
+-          Filter f = matcher.getFilter();
+-          results.add(f == null ? kv : f.transform(kv));
++          case DONE_SCAN:
++            close();
+ 
+-          if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_ROW) {
++            return false;
++
++          case SEEK_NEXT_ROW:
++            // This is just a relatively simple end of scan fix, to short-cut end
++            // us if there is an endKey in the scan.
+             if (!matcher.moreRowsMayExistAfter(kv)) {
+-              outResult.addAll(results);
+               return false;
+             }
+-            reseek(matcher.getKeyForNextRow(kv));
+-          } else if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_COL) {
+-            reseek(matcher.getKeyForNextColumn(kv));
+-          } else {
+-            this.heap.next();
+-          }
+-
+-          RegionMetricsStorage.incrNumericMetric(metricNameGetSize, kv.getLength());
+-          if (limit > 0 && (results.size() == limit)) {
+-            break LOOP;
+-          }
+-          continue;
+ 
+-        case DONE:
+-          // copy jazz
+-          outResult.addAll(results);
+-          return true;
+-
+-        case DONE_SCAN:
+-          close();
++            reseek(matcher.getKeyForNextRow(kv));
++            break;
+ 
+-          // copy jazz
+-          outResult.addAll(results);
++          case SEEK_NEXT_COL:
++            reseek(matcher.getKeyForNextColumn(kv));
++            break;
+ 
+-          return false;
++          case SKIP:
++            this.heap.next();
++            break;
++
++          case SEEK_NEXT_USING_HINT:
++            KeyValue nextKV = matcher.getNextKeyHint(kv);
++            if (nextKV != null) {
++              reseek(nextKV);
++            } else {
++              heap.next();
++            }
++            break;
+ 
+-        case SEEK_NEXT_ROW:
+-          // This is just a relatively simple end of scan fix, to short-cut end
+-          // us if there is an endKey in the scan.
+-          if (!matcher.moreRowsMayExistAfter(kv)) {
+-            outResult.addAll(results);
+-            return false;
+-          }
+-
+-          reseek(matcher.getKeyForNextRow(kv));
+-          break;
+-
+-        case SEEK_NEXT_COL:
+-          reseek(matcher.getKeyForNextColumn(kv));
+-          break;
+-
+-        case SKIP:
+-          this.heap.next();
+-          break;
+-
+-        case SEEK_NEXT_USING_HINT:
+-          KeyValue nextKV = matcher.getNextKeyHint(kv);
+-          if (nextKV != null) {
+-            reseek(nextKV);
+-          } else {
+-            heap.next();
+-          }
+-          break;
+-
+-        default:
+-          throw new RuntimeException("UNEXPECTED");
++          default:
++            throw new RuntimeException("UNEXPECTED");
++        }
+       }
++    } finally {
++      RegionMetricsStorage.incrNumericMetric(metricNameGetSize, cumulativeMetric);
+     }
+ 
+-    if (!results.isEmpty()) {
+-      // copy jazz
+-      outResult.addAll(results);
++    if (count > 0) {
+       return true;
+     }
+ 
+diff --git a/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerDynamicMetrics.java b/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerDynamicMetrics.java
+index fd0efa4..44a6fad 100644
+--- a/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerDynamicMetrics.java
++++ b/src/main/java/org/apache/hadoop/hbase/regionserver/metrics/RegionServerDynamicMetrics.java
+@@ -62,6 +62,7 @@ public class RegionServerDynamicMetrics implements Updater {
+     LogFactory.getLog(RegionServerDynamicStatistics.class);
+   
+   private boolean reflectionInitialized = false;
++  private boolean needsUpdateMessage = false;
+   private Field recordMetricMapField;
+   private Field registryMetricMapField;
+ 
+@@ -100,14 +101,7 @@ public class RegionServerDynamicMetrics implements Updater {
+     MetricsLongValue m = (MetricsLongValue)registry.get(name);
+     if (m == null) {
+       m = new MetricsLongValue(name, this.registry);
+-      try {
+-        if (updateMbeanInfoIfMetricsListChanged != null) {
+-          updateMbeanInfoIfMetricsListChanged.invoke(this.rsDynamicStatistics,
+-              new Object[]{});
+-        }
+-      } catch (Exception e) {
+-        LOG.error(e);
+-      }
++      this.needsUpdateMessage = true;
+     }
+     m.set(amt);
+   }
+@@ -119,14 +113,7 @@ public class RegionServerDynamicMetrics implements Updater {
+     MetricsTimeVaryingRate m = (MetricsTimeVaryingRate)registry.get(name);
+     if (m == null) {
+       m = new MetricsTimeVaryingRate(name, this.registry);
+-      try {
+-        if (updateMbeanInfoIfMetricsListChanged != null) {
+-          updateMbeanInfoIfMetricsListChanged.invoke(this.rsDynamicStatistics,
+-              new Object[]{});
+-        }
+-      } catch (Exception e) {
+-        LOG.error(e);
+-      }
++      this.needsUpdateMessage = true;
+     }
+     if (numOps > 0) {
+       m.inc(numOps, amt);
+@@ -139,7 +126,7 @@ public class RegionServerDynamicMetrics implements Updater {
+    */
+   @SuppressWarnings("rawtypes")
+   public void clear() {
+-    
++    this.needsUpdateMessage = true;
+     // If this is the first clear use reflection to get the two maps that hold copies of our 
+     // metrics on the hadoop metrics side. We have to use reflection because there is not 
+     // remove metrics on the hadoop side. If we can't get them then clearing old metrics 
+@@ -210,6 +197,21 @@ public class RegionServerDynamicMetrics implements Updater {
+           value.getSecond().getAndSet(0));
+     }
+ 
++    // If there are new metrics sending this message to jmx tells it to update everything.
++    // This is not ideal we should just move to metrics2 that has full support for dynamic metrics.
++    if (needsUpdateMessage) {
++      try {
++        if (updateMbeanInfoIfMetricsListChanged != null) {
++          updateMbeanInfoIfMetricsListChanged.invoke(this.rsDynamicStatistics,
++              new Object[]{});
++        }
++      } catch (Exception e) {
++        LOG.error(e);
++      }
++      needsUpdateMessage = false;
++    }
++
++
+     synchronized (registry) {
+       // Iterate through the registry to propagate the different rpc metrics.
+       for (String metricName : registry.getKeyList() ) {
+diff --git a/src/main/java/org/apache/hadoop/hbase/util/DumpSplitPoints.java b/src/main/java/org/apache/hadoop/hbase/util/DumpSplitPoints.java
+new file mode 100644
+index 0000000..cef5bdc
+--- /dev/null
++++ b/src/main/java/org/apache/hadoop/hbase/util/DumpSplitPoints.java
+@@ -0,0 +1,175 @@
++/**
++ * Copyright 2007 The Apache Software Foundation
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.util;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.TreeSet;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.conf.Configured;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.hadoop.hbase.HBaseConfiguration;
++import org.apache.hadoop.hbase.HConstants;
++import org.apache.hadoop.hbase.client.HBaseAdmin;
++import org.apache.hadoop.hbase.client.HTable;
++import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
++import org.apache.hadoop.io.NullWritable;
++import org.apache.hadoop.io.SequenceFile;
++import org.apache.hadoop.mapreduce.Job;
++import org.apache.hadoop.util.StringUtils;
++import org.apache.hadoop.util.Tool;
++import org.apache.hadoop.util.ToolRunner;
++
++
++/**
++ * @author jhuang4
++ *
++ */
++public class DumpSplitPoints extends Configured implements Tool {
++  public static String NAME = "DumpSplitPoints";
++  private HBaseAdmin hbAdmin;
++  private Configuration cfg;
++  private static Log LOG = LogFactory.getLog(DumpSplitPoints.class);
++
++  public DumpSplitPoints(Configuration conf)throws Exception {
++    super(conf);
++    this.cfg = conf;
++    this.hbAdmin = new HBaseAdmin(conf);
++  }
++
++  private int usage() {
++    System.err.println("usage: " + NAME +
++        " [-s <comma delimitted split point list>]" +
++        " [-t <tablename> ]" +
++        " outputFileName");
++    ToolRunner.printGenericCommandUsage(System.out);
++    return -1;
++  }
++
++  private boolean doesTableExist(String tablename) throws Exception {
++    return hbAdmin.tableExists(tablename);
++  }
++
++  private void dumpSplitPoints(List<ImmutableBytesWritable> splitpoints, String file, Job job) throws IOException{
++    if (splitpoints.isEmpty()) {
++      throw new IllegalArgumentException("No regions passed");
++    }
++    Configuration conf = job.getConfiguration();
++    Path outputFile = new Path(file);
++    FileSystem fs = outputFile.getFileSystem(conf);
++
++    TreeSet<ImmutableBytesWritable> sorted = new TreeSet<ImmutableBytesWritable>(
++        splitpoints);
++
++    ImmutableBytesWritable first = sorted.first();
++    if (first.equals(HConstants.EMPTY_BYTE_ARRAY)) {
++      sorted.remove(first);
++    }
++
++    if(sorted.size() == 0) {
++      System.err.println("No valid split points are specified or HTable only has one region.");
++    }
++
++    SequenceFile.Writer writer = SequenceFile.createWriter(fs, conf,
++        outputFile, ImmutableBytesWritable.class, NullWritable.class);
++
++    try {
++      for (ImmutableBytesWritable startKey : sorted) {
++        writer.append(startKey, NullWritable.get());
++      }
++    } finally {
++      writer.close();
++    }
++  }
++
++  List<ImmutableBytesWritable> getSplitPoints(HTable table) throws IOException {
++    byte[][] byteKeys = table.getStartKeys();
++    ArrayList<ImmutableBytesWritable> ret =
++      new ArrayList<ImmutableBytesWritable>(byteKeys.length);
++    for (byte[] byteKey : byteKeys) {
++      ret.add(new ImmutableBytesWritable(byteKey));
++    }
++    return ret;
++  }
++
++  List<ImmutableBytesWritable> getSplitPoints(String[] splitpoints) {
++    if(splitpoints == null || splitpoints.length == 0){
++      return null;
++    }
++    ArrayList<ImmutableBytesWritable> ret =
++        new ArrayList<ImmutableBytesWritable>(splitpoints.length);
++    for (String  point : splitpoints) {
++      ret.add(new ImmutableBytesWritable(point.getBytes()));
++    }
++    return ret;
++  }
++
++  @Override
++  public int run(String[] args) throws Exception {
++    if (args.length < 1) {
++      usage();
++      return -1;
++    }
++    String outputfile = null;
++    Job job = new Job(getConf());
++    List<ImmutableBytesWritable> splits = null;
++    for(int i=0; i < args.length; ++i) {
++      if ("-s".equals(args[i])) {
++        String[] splitpoints = StringUtils.getStrings(args[++i]);
++        splits = getSplitPoints(splitpoints);
++      } else if ("-t".equals(args[i])) {
++        String tableName = args[++i];
++        if(doesTableExist(tableName)) {
++          splits = getSplitPoints(new HTable(cfg, tableName));
++        }
++      } else {
++        outputfile = args[i];
++      }
++    }
++
++    if(outputfile == null || outputfile.equals("")) {
++      System.err.println("Please define one output file name");
++      return usage();
++    }
++
++    if(splits == null) {
++      System.err.println("Please specify correct table name or split points");
++      return usage();
++    }
++
++    dumpSplitPoints(splits, outputfile, job);
++    return 0;
++  }
++
++  /**
++   * @param args
++   */
++  public static void main(String[] args) throws Exception{
++    // TODO Auto-generated method stub
++    int ret = ToolRunner.run(new DumpSplitPoints(HBaseConfiguration.create()), args);
++    System.exit(ret);
++  }
++
++}
+diff --git a/src/test/java/org/apache/hadoop/hbase/HBaseTestCase.java b/src/test/java/org/apache/hadoop/hbase/HBaseTestCase.java
+index 4a57e4d..76faa60 100644
+--- a/src/test/java/org/apache/hadoop/hbase/HBaseTestCase.java
++++ b/src/test/java/org/apache/hadoop/hbase/HBaseTestCase.java
+@@ -71,7 +71,7 @@ public abstract class HBaseTestCase extends TestCase {
+   protected static final byte [][] COLUMNS = {fam1, fam2, fam3};
+ 
+   private boolean localfs = false;
+-  protected Path testDir = null;
++  protected static Path testDir = null;
+   protected FileSystem fs = null;
+   protected HRegion root = null;
+   protected HRegion meta = null;
+@@ -180,10 +180,16 @@ public abstract class HBaseTestCase extends TestCase {
+    * @return An {@link HRegion}
+    * @throws IOException
+    */
+-  protected HRegion createNewHRegion(HTableDescriptor desc, byte [] startKey,
++  public HRegion createNewHRegion(HTableDescriptor desc, byte [] startKey,
+       byte [] endKey)
+   throws IOException {
+     FileSystem filesystem = FileSystem.get(conf);
++    return createNewHRegion(desc, startKey, endKey, this.conf);
++  }
++
++  public HRegion createNewHRegion(HTableDescriptor desc, byte [] startKey,
++      byte [] endKey, Configuration conf)
++  throws IOException {
+     HRegionInfo hri = new HRegionInfo(desc.getName(), startKey, endKey);
+     return HRegion.createHRegion(hri, testDir, conf, desc);
+   }
+@@ -248,10 +254,11 @@ public abstract class HBaseTestCase extends TestCase {
+    * Adds data of the from 'aaa', 'aab', etc where key and value are the same.
+    * @param r
+    * @param columnFamily
++   * @param column
+    * @throws IOException
+    * @return count of what we added.
+    */
+-  protected static long addContent(final HRegion r, final byte [] columnFamily)
++  public static long addContent(final HRegion r, final byte [] columnFamily, final byte[] column)
+   throws IOException {
+     byte [] startKey = r.getRegionInfo().getStartKey();
+     byte [] endKey = r.getRegionInfo().getEndKey();
+@@ -259,7 +266,7 @@ public abstract class HBaseTestCase extends TestCase {
+     if (startKeyBytes == null || startKeyBytes.length == 0) {
+       startKeyBytes = START_KEY_BYTES;
+     }
+-    return addContent(new HRegionIncommon(r), Bytes.toString(columnFamily), null,
++    return addContent(new HRegionIncommon(r), Bytes.toString(columnFamily), Bytes.toString(column),
+       startKeyBytes, endKey, -1);
+   }
+ 
+@@ -267,18 +274,32 @@ public abstract class HBaseTestCase extends TestCase {
+    * Add content to region <code>r</code> on the passed column
+    * <code>column</code>.
+    * Adds data of the from 'aaa', 'aab', etc where key and value are the same.
++   * @param r
++   * @param columnFamily
++   * @throws IOException
++   * @return count of what we added.
++   */
++  protected static long addContent(final HRegion r, final byte [] columnFamily)
++  throws IOException {
++    return addContent(r, columnFamily, null);
++  }
++
++  /**
++   * Add content to region <code>r</code> on the passed column
++   * <code>column</code>.
++   * Adds data of the from 'aaa', 'aab', etc where key and value are the same.
+    * @param updater  An instance of {@link Incommon}.
+    * @param columnFamily
+    * @throws IOException
+    * @return count of what we added.
+    */
+   protected static long addContent(final Incommon updater,
+-                                   final String columnFamily) throws IOException {
++      final String columnFamily) throws IOException {
+     return addContent(updater, columnFamily, START_KEY_BYTES, null);
+   }
+ 
+   protected static long addContent(final Incommon updater, final String family,
+-                                   final String column) throws IOException {
++      final String column) throws IOException {
+     return addContent(updater, family, column, START_KEY_BYTES, null);
+   }
+ 
+diff --git a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestHFileBlockIndex.java b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestHFileBlockIndex.java
+index 4f00755..8cbbc23 100644
+--- a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestHFileBlockIndex.java
++++ b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestHFileBlockIndex.java
+@@ -380,8 +380,8 @@ public class TestHFileBlockIndex {
+       // Now test we can get the offset and the on-disk-size using a
+       // higher-level API function.s
+       boolean locateBlockResult =
+-        BlockIndexReader.locateNonRootIndexEntry(nonRootIndex, arrayHoldingKey,
+-            searchKey.length / 2, searchKey.length, Bytes.BYTES_RAWCOMPARATOR);
++        (BlockIndexReader.locateNonRootIndexEntry(nonRootIndex, arrayHoldingKey,
++            searchKey.length / 2, searchKey.length, Bytes.BYTES_RAWCOMPARATOR) != -1);
+ 
+       if (i == 0) {
+         assertFalse(locateBlockResult);
+diff --git a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestReseekTo.java b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestReseekTo.java
+index 6430f32..6c859fd 100644
+--- a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestReseekTo.java
++++ b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestReseekTo.java
+@@ -22,6 +22,8 @@ package org.apache.hadoop.hbase.io.hfile;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
++import junit.framework.Assert;
++
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.Path;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+@@ -87,7 +89,7 @@ public class TestReseekTo {
+       String value = valueList.get(i);
+       long start = System.nanoTime();
+       scanner.reseekTo(Bytes.toBytes(key));
+-      assertEquals(value, scanner.getValueString());
++      assertEquals("i is " + i, value, scanner.getValueString());
+     }
+ 
+     reader.close();
+diff --git a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestSeekTo.java b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestSeekTo.java
+index bb7d75a..1a2ce15 100644
+--- a/src/test/java/org/apache/hadoop/hbase/io/hfile/TestSeekTo.java
++++ b/src/test/java/org/apache/hadoop/hbase/io/hfile/TestSeekTo.java
+@@ -98,6 +98,89 @@ public class TestSeekTo extends HBaseTestCase {
+     reader.close();
+   }
+ 
++  public void testSeekBeforeWithReSeekTo() throws Exception {
++    Path p = makeNewFile();
++    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf));
++    reader.loadFileInfo();
++    HFileScanner scanner = reader.getScanner(false, true);
++    assertEquals(false, scanner.seekBefore(toKV("a").getKey()));
++    assertEquals(false, scanner.seekBefore(toKV("b").getKey()));
++    assertEquals(false, scanner.seekBefore(toKV("c").getKey()));
++
++    // seekBefore d, so the scanner points to c
++    assertEquals(true, scanner.seekBefore(toKV("d").getKey()));
++    assertEquals("c", toRowStr(scanner.getKeyValue()));
++    // reseekTo e and g
++    assertEquals(0, scanner.reseekTo(toKV("c").getKey()));
++    assertEquals("c", toRowStr(scanner.getKeyValue()));
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore e, so the scanner points to c
++    assertEquals(true, scanner.seekBefore(toKV("e").getKey()));
++    assertEquals("c", toRowStr(scanner.getKeyValue()));
++    // reseekTo e and g
++    assertEquals(0, scanner.reseekTo(toKV("e").getKey()));
++    assertEquals("e", toRowStr(scanner.getKeyValue()));
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore f, so the scanner points to e
++    assertEquals(true, scanner.seekBefore(toKV("f").getKey()));
++    assertEquals("e", toRowStr(scanner.getKeyValue()));
++    // reseekTo e and g
++    assertEquals(0, scanner.reseekTo(toKV("e").getKey()));
++    assertEquals("e", toRowStr(scanner.getKeyValue()));
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore g, so the scanner points to e
++    assertEquals(true, scanner.seekBefore(toKV("g").getKey()));
++    assertEquals("e", toRowStr(scanner.getKeyValue()));
++    // reseekTo e and g again
++    assertEquals(0, scanner.reseekTo(toKV("e").getKey()));
++    assertEquals("e", toRowStr(scanner.getKeyValue()));
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore h, so the scanner points to g
++    assertEquals(true, scanner.seekBefore(toKV("h").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++    // reseekTo g
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore i, so the scanner points to g
++    assertEquals(true, scanner.seekBefore(toKV("i").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++    // reseekTo g
++    assertEquals(0, scanner.reseekTo(toKV("g").getKey()));
++    assertEquals("g", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore j, so the scanner points to i
++    assertEquals(true, scanner.seekBefore(toKV("j").getKey()));
++    assertEquals("i", toRowStr(scanner.getKeyValue()));
++    // reseekTo i
++    assertEquals(0, scanner.reseekTo(toKV("i").getKey()));
++    assertEquals("i", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore k, so the scanner points to i
++    assertEquals(true, scanner.seekBefore(toKV("k").getKey()));
++    assertEquals("i", toRowStr(scanner.getKeyValue()));
++    // reseekTo i and k
++    assertEquals(0, scanner.reseekTo(toKV("i").getKey()));
++    assertEquals("i", toRowStr(scanner.getKeyValue()));
++    assertEquals(0, scanner.reseekTo(toKV("k").getKey()));
++    assertEquals("k", toRowStr(scanner.getKeyValue()));
++
++    // seekBefore l, so the scanner points to k
++    assertEquals(true, scanner.seekBefore(toKV("l").getKey()));
++    assertEquals("k", toRowStr(scanner.getKeyValue()));
++    // reseekTo k
++    assertEquals(0, scanner.reseekTo(toKV("k").getKey()));
++    assertEquals("k", toRowStr(scanner.getKeyValue()));
++  }
++
+   public void testSeekTo() throws Exception {
+     Path p = makeNewFile();
+     HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf));
+diff --git a/src/test/java/org/apache/hadoop/hbase/regionserver/TestBlocksScanned.java b/src/test/java/org/apache/hadoop/hbase/regionserver/TestBlocksScanned.java
+new file mode 100644
+index 0000000..19c690f
+--- /dev/null
++++ b/src/test/java/org/apache/hadoop/hbase/regionserver/TestBlocksScanned.java
+@@ -0,0 +1,117 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.regionserver;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++
++import org.apache.hadoop.hbase.HBaseTestCase;
++import org.apache.hadoop.hbase.HBaseTestingUtility;
++import org.apache.hadoop.hbase.HColumnDescriptor;
++import org.apache.hadoop.hbase.HTableDescriptor;
++import org.apache.hadoop.hbase.KeyValue;
++import org.apache.hadoop.hbase.SmallTests;
++import org.apache.hadoop.hbase.client.Scan;
++import org.apache.hadoop.hbase.io.hfile.Compression;
++import org.apache.hadoop.hbase.io.hfile.BlockType.BlockCategory;
++import org.apache.hadoop.hbase.regionserver.metrics.SchemaMetrics;
++import org.apache.hadoop.hbase.regionserver.metrics.SchemaMetrics.BlockMetricType;
++import org.apache.hadoop.hbase.util.Bytes;
++import org.junit.Assert;
++import org.junit.Test;
++import org.junit.experimental.categories.Category;
++
++@SuppressWarnings("deprecation")
++@Category(SmallTests.class)
++public class TestBlocksScanned extends HBaseTestCase {
++  private static byte [] TABLE = Bytes.toBytes("TestBlocksScanned");
++  private static byte [] FAMILY = Bytes.toBytes("family");
++  private static byte [] COL = Bytes.toBytes("col");
++  private static byte [] START_KEY = Bytes.toBytes("aaa");
++  private static byte [] END_KEY = Bytes.toBytes("zzz");
++  private static int BLOCK_SIZE = 70;
++
++  private static HBaseTestingUtility TEST_UTIL = null;
++  private static HTableDescriptor TESTTABLEDESC = null;
++
++   @Override
++   public void setUp() throws Exception {
++     super.setUp();
++     SchemaMetrics.setUseTableNameInTest(true);
++     TEST_UTIL = new HBaseTestingUtility();
++     TESTTABLEDESC = new HTableDescriptor(TABLE);
++
++     TESTTABLEDESC.addFamily(
++         new HColumnDescriptor(FAMILY)
++         .setMaxVersions(10)
++         .setBlockCacheEnabled(true)
++         .setBlocksize(BLOCK_SIZE)
++         .setCompressionType(Compression.Algorithm.NONE)
++     );
++   }
++
++   @Test
++  public void testBlocksScanned() throws Exception {
++    HRegion r = createNewHRegion(TESTTABLEDESC, START_KEY, END_KEY,
++        TEST_UTIL.getConfiguration());
++    addContent(r, FAMILY, COL);
++    r.flushcache();
++
++    // Get the per-cf metrics
++    SchemaMetrics schemaMetrics =
++      SchemaMetrics.getInstance(Bytes.toString(TABLE), Bytes.toString(FAMILY));
++    Map<String, Long> schemaMetricSnapshot = SchemaMetrics.getMetricsSnapshot();
++
++    // Do simple test of getting one row only first.
++    Scan scan = new Scan(Bytes.toBytes("aaa"), Bytes.toBytes("aaz"));
++    scan.addColumn(FAMILY, COL);
++    scan.setMaxVersions(1);
++
++    InternalScanner s = r.getScanner(scan);
++    List<KeyValue> results = new ArrayList<KeyValue>();
++    while (s.next(results));
++    s.close();
++
++    int expectResultSize = 'z' - 'a';
++    Assert.assertEquals(expectResultSize, results.size());
++
++    int kvPerBlock = (int) Math.ceil(BLOCK_SIZE / (double) results.get(0).getLength());
++    Assert.assertEquals(2, kvPerBlock);
++
++    long expectDataBlockRead = (long) Math.ceil(expectResultSize / (double) kvPerBlock);
++    long expectIndexBlockRead = expectDataBlockRead;
++
++    verifyDataAndIndexBlockRead(schemaMetricSnapshot, schemaMetrics,
++        expectDataBlockRead, expectIndexBlockRead);
++  }
++
++  private void verifyDataAndIndexBlockRead(Map<String, Long> previousMetricSnapshot,
++      SchemaMetrics schemaMetrics, long expectDataBlockRead, long expectedIndexBlockRead){
++    Map<String, Long> currentMetricsSnapshot = SchemaMetrics.getMetricsSnapshot();
++    Map<String, Long> diffs =
++      SchemaMetrics.diffMetrics(previousMetricSnapshot, currentMetricsSnapshot);
++
++    long dataBlockRead = SchemaMetrics.getLong(diffs,
++        schemaMetrics.getBlockMetricName(BlockCategory.DATA, false, BlockMetricType.READ_COUNT));
++    long indexBlockRead = SchemaMetrics.getLong(diffs,
++        schemaMetrics.getBlockMetricName(BlockCategory.INDEX, false, BlockMetricType.READ_COUNT));
++
++    Assert.assertEquals(expectDataBlockRead, dataBlockRead);
++    Assert.assertEquals(expectedIndexBlockRead, indexBlockRead);
++  }
++}
