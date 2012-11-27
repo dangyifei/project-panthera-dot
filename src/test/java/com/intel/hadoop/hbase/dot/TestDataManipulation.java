@@ -300,29 +300,6 @@ public class TestDataManipulation {
       success = false;
     }
     assertTrue("Get operation failed", success);
-
-    try {
-      success = true;
-      HTable table = new HTable(TestDataManipulation.conf, name);
-      assertTrue("Fail to create the DOT table", admin.tableExists(name));
-
-      Get get = new Get(Bytes.toBytes("row1"));
-      get.addColumn(Bytes.toBytes("f1"), Bytes.toBytes("doc1"));
-
-      Result result = table.get(get);
-      byte[] val1 = result.getValue(Bytes.toBytes("f1"),
-          Bytes.toBytes("doc1.field1"));
-      assertEquals("The returned value is not correct", Bytes.toString(val1),
-          "row1_fd1");
-      byte[] val2 = result.getValue(Bytes.toBytes("f1"),
-          Bytes.toBytes("doc1.field2"));
-      assertEquals("The returned value is not correct", Bytes.toString(val2),
-          "row1_fd2");
-      table.close();
-    } catch (IOException e) {
-      success = false;
-    }
-    assertTrue("Get operation failed", success);
   }
 
   @Test

@@ -101,7 +101,7 @@ public class TestHiveIntegration {
 
   }
 */
-  @Test
+  //@Test
   public void bulkload() {
     String[] args = new String[] { "/bulkload", new String(name) };
     boolean success = true;
