@@ -38,7 +38,6 @@ import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Result;
 
-import org.apache.hadoop.hbase.mapreduce.ImportTsv;
 import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.mapreduce.Job;
@@ -52,6 +51,8 @@ import static org.junit.Assert.*;
 import org.apache.hadoop.hbase.MediumTests;
 import org.junit.experimental.categories.Category;
 
+import com.intel.hadoop.hbase.dot.mapreduce.DotImportTsv;
+
 /**
  * To test hive integration for DOT
  *
@@ -64,14 +65,13 @@ public class TestHiveIntegration {
   private static HBaseAdmin admin = null;
   private static byte[] name = Bytes.toBytes("test");
 
-/*  
   @Test
   public void importtsv() {
 
     String[] args = new String[] {
         "-D"
             + "importtsv.mapper.class"
-            + "=com.intel.hadoop.hbase.dot.access.mapreduce.DotTsvImporterMapper",
+            + "=com.intel.hadoop.hbase.dot.mapreduce.DotTsvImporterMapper",
         "-D" + "importtsv.separator" + "=|",
         "-D" + "importtsv.bulk.output" + "=/bulkload",
         "-D"
@@ -85,10 +85,10 @@ public class TestHiveIntegration {
       String[] otherArgs = new GenericOptionsParser(conf, args)
           .getRemainingArgs();
       LOG.info("remaining args: " + otherArgs[0] + " " + otherArgs[1]);
-      ImportTsv.createHbaseAdmin(conf);
-      Job job = ImportTsv.createSubmittableJob(conf, otherArgs);
+      DotImportTsv.createHbaseAdmin(conf);
+      Job job = DotImportTsv.createSubmittableJob(conf, otherArgs);
       job.waitForCompletion(true);
-      assertTrue("ImportTSV job failed", job.isSuccessful());
+      assertTrue("DotImportTSV job failed", job.isSuccessful());
     } catch (IOException e) {
       success = false;
     } catch (ClassNotFoundException e) {
@@ -97,10 +97,10 @@ public class TestHiveIntegration {
       success = false;
     }
 
-    assertTrue("ImportTSV operation failed", success);
+    assertTrue("DotImportTSV operation failed", success);
 
   }
-*/
+
   //@Test
   public void bulkload() {
     String[] args = new String[] { "/bulkload", new String(name) };

@@ -1,7 +1,7 @@
 
 ## Build from source code ##
 
-In order to run DOT coprocessor against HBASE, you need to build it against HBASE 0.94.1 with patch file at present. The patch are backported from HBASE trunk, including HBASE-6032, FilterWrapper and CP Interface preStoreScannnerOpen related codes. To build against HBASE trunk
+In order to run DOT coprocessor against HBASE, you need to build it against HBASE 0.94.1 with patch file at present. The patch are backported from HBASE trunk, including HBASE-6032, FilterWrapper and CP Interface preStoreScannnerOpen related codes.
 
 
 * Apply patches/dot-on-hbase-0.94.1.patch on top of hbase 0.94.1 tag. Then build,install and setup cluster following HBase's common guide doc.

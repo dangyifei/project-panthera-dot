@@ -40,6 +40,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.intel.hadoop.hbase.dot.doc.DocSchemaMissMatchException;
+import com.intel.hadoop.hbase.dot.mapreduce.DotImportTsv.TsvParser;
 
 /**
  * All the utilities are defined in this class.
@@ -94,7 +95,10 @@ public class DotUtil {
         Bytes.BYTES_COMPARATOR);
 
     for (String aColumn : columns) {
-
+      
+      if (TsvParser.ROWKEY_COLUMN_SPEC.equals(aColumn))
+        continue;
+      
       byte[] columnName = aColumn.getBytes();
       // we are only concerned with the first one (in case this is a cf:cq)
       byte[][] cfvsdoc = org.apache.hadoop.hbase.KeyValue
