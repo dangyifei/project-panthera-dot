@@ -123,10 +123,6 @@ class StringRange {
 
     return afterStart && beforeEnd;
   }
-
-  @org.junit.Rule
-  public org.apache.hadoop.hbase.ResourceCheckerJUnitRule cu =
-    new org.apache.hadoop.hbase.ResourceCheckerJUnitRule();
 }
 
 
@@ -412,10 +408,12 @@ public class TestFiltersOnDot {
   @BeforeClass
   public static void setUp() throws Exception {
     conf = TEST_UTIL.getConfiguration();
+
     conf.set("hbase.coprocessor.region.classes",
         "com.intel.hadoop.hbase.dot.access.DataManipulationOps");
     conf.set("hbase.coprocessor.master.classes",
         "com.intel.hadoop.hbase.dot.access.DataDefinitionOps");
+
     TEST_UTIL.startMiniCluster(1);
     initialize(conf);
   }
@@ -2172,18 +2170,9 @@ public class TestFiltersOnDot {
       LOG.info("found " + results.size() + " results");
       LOG.info("Expecting " + rangeMap.get(s).size() + " results");
 
-      /*
-      for (KeyValue kv : results) {
-        LOG.info("found row " + Bytes.toString(kv.getRow()) + ", column "
-            + Bytes.toString(kv.getQualifier()));
-      }
-      */
-
       assertEquals(rangeMap.get(s).size(), results.size());
     }
     ht.close();
   }
 
-  @org.junit.Rule
-  public org.apache.hadoop.hbase.ResourceCheckerJUnitRule cu = new org.apache.hadoop.hbase.ResourceCheckerJUnitRule();
 }

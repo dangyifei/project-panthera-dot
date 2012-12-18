@@ -51,8 +51,8 @@ import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.regionserver.DocStoreScanner;
+import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
-import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
@@ -440,7 +440,7 @@ public class DataManipulationOps extends BaseRegionObserver {
    */
   @Override
   public KeyValueScanner preStoreScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> e,
-      final Store store, final Scan scan, final NavigableSet<byte[]> targetCols,
+      final HStore store, final Scan scan, final NavigableSet<byte[]> targetCols,
       final KeyValueScanner s) throws IOException {
 
     HTableDescriptor desc = e.getEnvironment().getRegion().getTableDesc();
@@ -448,7 +448,8 @@ public class DataManipulationOps extends BaseRegionObserver {
       return null;
     }
 
-    DocStoreScanner scanner = new DocStoreScanner(store, scan, targetCols);
+    DocStoreScanner scanner = new DocStoreScanner(
+        store, store.getScanInfo(), scan, targetCols);
     scanner.init(this.nullFormatBytes);
     return scanner;
   }

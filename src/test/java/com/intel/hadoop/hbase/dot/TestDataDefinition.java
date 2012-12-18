@@ -246,7 +246,4 @@ public class TestDataDefinition {
   public static void tearDown() throws Exception {
     TEST_UTIL.shutdownMiniCluster();
   }
-
-  @org.junit.Rule
-  public org.apache.hadoop.hbase.ResourceCheckerJUnitRule cu = new org.apache.hadoop.hbase.ResourceCheckerJUnitRule();
 }

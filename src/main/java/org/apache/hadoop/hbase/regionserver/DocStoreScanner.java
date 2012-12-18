@@ -1,5 +1,4 @@
 /**
- * Copyright 2010 The Apache Software Foundation
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,61 +19,53 @@
 
 package org.apache.hadoop.hbase.regionserver;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.NavigableSet;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.HColumnDescriptor;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.KeyValue.Type;
-import org.apache.hadoop.hbase.client.Scan;
 import com.intel.hadoop.hbase.dot.DotConstants;
 import com.intel.hadoop.hbase.dot.DotInvalidIOException;
 import com.intel.hadoop.hbase.dot.DotUtil;
 import com.intel.hadoop.hbase.dot.doc.Document.DocSchemaField;
 import com.intel.hadoop.hbase.dot.doc.Document;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.NavigableSet;
+import java.util.TreeMap;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.KeyValue.Type;
+import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
-import org.apache.hadoop.hbase.regionserver.ChangedReadersObserver;
-import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.KeyValueHeap;
-import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
-import org.apache.hadoop.hbase.regionserver.NonLazyKeyValueScanner;
-import org.apache.hadoop.hbase.regionserver.ScanQueryMatcher;
-import org.apache.hadoop.hbase.regionserver.Store;
-import org.apache.hadoop.hbase.regionserver.StoreScanner;
-import org.apache.hadoop.hbase.regionserver.metrics.RegionMetricsStorage;
-import org.apache.hadoop.hbase.regionserver.metrics.SchemaMetrics;
+import org.apache.hadoop.hbase.regionserver.HStore.ScanInfo;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.util.StringUtils;
 
+
 /**
  * Scanner scans both the memstore and the HStore. Coalesce KeyValue stream
  * into List<KeyValue> for a single row.
  */
-
+@InterfaceAudience.Private
 public class DocStoreScanner extends NonLazyKeyValueScanner
     implements KeyValueScanner, InternalScanner, ChangedReadersObserver {
   static final Log LOG = LogFactory.getLog(DocStoreScanner.class);
-  private Store store;
+  private HStore store;
   private ScanQueryMatcher matcher;
   private KeyValueHeap heap;
   private boolean cacheBlocks;
 
-  private String metricNameGetSize;
+  private int countPerRow = 0;
+  private int storeLimit = -1;
+  private int storeOffset = 0;
 
   // Used to indicate that the scanner has closed (see HBASE-1107)
   // Doesnt need to be volatile because it's always accessed via synchronized methods
@@ -183,7 +174,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
   }
   
   /** An internal constructor. */
-  private DocStoreScanner(Store store, boolean cacheBlocks, Scan scan,
+  private DocStoreScanner(HStore store, boolean cacheBlocks, Scan scan,
       final NavigableSet<byte[]> columns, long ttl, int minVersions) {
     this.store = store;
     this.cacheBlocks = cacheBlocks;
@@ -211,18 +202,17 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
    * @param columns which columns we are scanning
    * @throws IOException
    */
-  public DocStoreScanner(Store store, Scan scan, final NavigableSet<byte[]> columns)
+  public DocStoreScanner(HStore store, ScanInfo scanInfo, Scan scan, final NavigableSet<byte[]> columns)
                               throws IOException {
-    this(store, scan.getCacheBlocks(), scan, columns, store.scanInfo.getTtl(),
-        store.scanInfo.getMinVersions());
-    initializeMetricNames();
+    this(store, scan.getCacheBlocks(), scan, columns, scanInfo.getTtl(),
+        scanInfo.getMinVersions());
     prepareForDoc();
     if (columns != null && scan.isRaw()) {
       throw new DoNotRetryIOException(
           "Cannot specify any column for a raw scan");
     }
-    matcher = new ScanQueryMatcher(scan, store.scanInfo, columns,
-        StoreScanner.ScanType.USER_SCAN, Long.MAX_VALUE, HConstants.LATEST_TIMESTAMP,
+    matcher = new ScanQueryMatcher(scan, scanInfo, columns,
+        ScanType.USER_SCAN, Long.MAX_VALUE, HConstants.LATEST_TIMESTAMP,
         oldestUnexpiredTS);
 
     // Pass columns to try to filter out unnecessary StoreFiles.
@@ -242,6 +232,12 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
       }
     }
 
+    // set storeLimit
+    this.storeLimit = scan.getMaxResultsPerColumnFamily();
+
+    // set rowOffset
+    this.storeOffset = scan.getRowOffsetPerColumnFamily();
+
     // Combine all seeked scanners with a heap
     heap = new KeyValueHeap(scanners, store.comparator);
 
@@ -258,13 +254,12 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
    * @param smallestReadPoint the readPoint that we should use for tracking
    *          versions
    */
-  DocStoreScanner(Store store, Scan scan,
-      List<? extends KeyValueScanner> scanners, StoreScanner.ScanType scanType,
+  public DocStoreScanner(HStore store, ScanInfo scanInfo, Scan scan,
+      List<? extends KeyValueScanner> scanners, ScanType scanType,
       long smallestReadPoint, long earliestPutTs) throws IOException {
-    this(store, false, scan, null, store.scanInfo.getTtl(),
-        store.scanInfo.getMinVersions());
-    initializeMetricNames();
-    matcher = new ScanQueryMatcher(scan, store.scanInfo, null, scanType,
+    this(store, false, scan, null, scanInfo.getTtl(),
+        scanInfo.getMinVersions());
+    matcher = new ScanQueryMatcher(scan, scanInfo, null, scanType,
         smallestReadPoint, earliestPutTs, oldestUnexpiredTS);
 
     // Filter the list of scanners using Bloom filters, time range, TTL, etc.
@@ -280,21 +275,20 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
   }
 
   /** Constructor for testing. */
-  DocStoreScanner(final Scan scan, Store.ScanInfo scanInfo,
-      StoreScanner.ScanType scanType, final NavigableSet<byte[]> columns,
+  DocStoreScanner(final Scan scan, HStore.ScanInfo scanInfo,
+      ScanType scanType, final NavigableSet<byte[]> columns,
       final List<KeyValueScanner> scanners) throws IOException {
     this(scan, scanInfo, scanType, columns, scanners,
         HConstants.LATEST_TIMESTAMP);
   }
 
   // Constructor for testing.
-  DocStoreScanner(final Scan scan, Store.ScanInfo scanInfo,
-      StoreScanner.ScanType scanType, final NavigableSet<byte[]> columns,
+  DocStoreScanner(final Scan scan, HStore.ScanInfo scanInfo,
+      ScanType scanType, final NavigableSet<byte[]> columns,
       final List<KeyValueScanner> scanners, long earliestPutTs)
           throws IOException {
     this(null, scan.getCacheBlocks(), scan, columns, scanInfo.getTtl(),
         scanInfo.getMinVersions());
-    this.initializeMetricNames();
     this.matcher = new ScanQueryMatcher(scan, scanInfo, columns, scanType,
         Long.MAX_VALUE, earliestPutTs, oldestUnexpiredTS);
 
@@ -412,24 +406,6 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
     return true;
   }
 
-
-  /**
-   * Method used internally to initialize metric names throughout the
-   * constructors.
-   * 
-   * To be called after the store variable has been initialized!
-   */
-  private void initializeMetricNames() {
-    String tableName = SchemaMetrics.UNKNOWN;
-    String family = SchemaMetrics.UNKNOWN;
-    if (store != null) {
-      tableName = store.getTableName();
-      family = Bytes.toString(store.getFamily().getName());
-    }
-    metricNameGetSize = SchemaMetrics.generateSchemaMetricsPrefix(
-        tableName, family) + "getsize";
-  }
-
   /**
    * Get a filtered list of scanners. Assumes we are not in a compaction.
    * @return list of scanners to seek
@@ -526,6 +502,18 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
    */
   @Override
   public synchronized boolean next(List<KeyValue> outResult, int limit) throws IOException {
+    return next(outResult, limit, null);
+  }
+
+  /**
+   * Get the next row of values from this Store.
+   * @param outResult
+   * @param limit
+   * @return true if there are more rows, false if scanner is done
+   */
+  @Override
+  public synchronized boolean next(List<KeyValue> outResult, int limit,
+      String metric) throws IOException {
 
     if (checkReseek()) {
       return true;
@@ -546,8 +534,12 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
     // only call setRow if the row changes; avoids confusing the query matcher
     // if scanning intra-row
-    if ((matcher.row == null) || !peeked.matchingRow(matcher.row)) {
-      matcher.setRow(peeked.getRow());
+    byte[] row = peeked.getBuffer();
+    int offset = peeked.getRowOffset();
+    short length = peeked.getRowLength();
+    if ((matcher.row == null) || !Bytes.equals(row, offset, length, matcher.row, matcher.rowOffset, matcher.rowLength)) {
+      this.countPerRow = 0;
+      matcher.setRow(row, offset, length);
     }
 
     KeyValue rawKV;
@@ -556,7 +548,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
     // Only do a sanity-check if store and comparator are available.
     KeyValue.KVComparator comparator =
-      store != null ? store.getComparator() : null;
+        store != null ? store.getComparator() : null;
 
     long cumulativeMetric = 0;
     int count = 0;
@@ -588,27 +580,47 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
         isRawKV = dockv.isRaw;
         boolean skipDoc = false;
         // TODO : need to handle batch operation (limit), i.e. need to handle various seek
-        while(true) {
+        while (true) {
           KeyValue kv = dockv.getNextKV();
           if (kv == null)
             break;
-          
+
           ScanQueryMatcher.MatchCode qcode = matcher.match(kv);
-          switch(qcode) {
+          switch (qcode) {
           case INCLUDE:
           case INCLUDE_AND_SEEK_NEXT_ROW:
           case INCLUDE_AND_SEEK_NEXT_COL:
 
             Filter f = matcher.getFilter();
-            outResult.add(f == null ? kv : f.transform(kv));
-            count++;
+            if (f != null) {
+              kv = f.transform(kv);
+            }
+
+            this.countPerRow++;
+            if (storeLimit > -1
+                && this.countPerRow > (storeLimit + storeOffset)) {
+              // do what SEEK_NEXT_ROW does.
+              if (!matcher.moreRowsMayExistAfter(kv)) {
+                return false;
+              }
+              reseek(matcher.getKeyForNextRow(kv));
+              break LOOP;
+            }
+
+            // add to results only if we have skipped #storeOffset kvs
+            // also update metric accordingly
+            if (this.countPerRow > storeOffset) {
+              if (metric != null) {
+                cumulativeMetric += kv.getLength();
+              }
+              outResult.add(kv);
+              count++;
+            }
 
             if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_ROW) {
               if (!matcher.moreRowsMayExistAfter(kv)) {
                 return false;
               }
-
-              // TODO need to fix this correctly.
               reseek(matcher.getKeyForNextRow(kv));
               skipDoc = true;
             } else if (qcode == ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_COL) {
@@ -620,7 +632,6 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
             } else {
             }
 
-            cumulativeMetric += kv.getLength();
             if (limit > 0 && (count == limit)) {
               // TODO Double Check the boundary condition carefully.
 
@@ -642,11 +653,11 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
           case DONE_SCAN:
             close();
-
             return false;
 
           case SEEK_NEXT_ROW:
-            // This is just a relatively simple end of scan fix, to short-cut end
+            // This is just a relatively simple end of scan fix, to short-cut
+            // end
             // us if there is an endKey in the scan.
             if (!matcher.moreRowsMayExistAfter(kv)) {
               return false;
@@ -659,7 +670,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
           case SEEK_NEXT_COL:
             // TODO need to fix this correctly.
             // Just ignore this for now if it is not raw kv.
-            if(isRawKV) {
+            if (isRawKV) {
               reseek(matcher.getKeyForNextColumn(kv));
             }
             continue;
@@ -686,7 +697,9 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
         this.heap.next();
       }
     } finally {
-      RegionMetricsStorage.incrNumericMetric(metricNameGetSize, cumulativeMetric);
+      if (cumulativeMetric > 0 && metric != null) {
+
+      }
     }
 
     if (count > 0) {
@@ -700,7 +713,13 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
 
   @Override
   public synchronized boolean next(List<KeyValue> outResult) throws IOException {
-    return next(outResult, -1);
+    return next(outResult, -1, null);
+  }
+
+  @Override
+  public synchronized boolean next(List<KeyValue> outResult, String metric)
+      throws IOException {
+    return next(outResult, -1, metric);
   }
 
   // Implementation of ChangedReadersObserver
@@ -727,7 +746,6 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
     // Let the next() call handle re-creating and seeking
   }
 
-
   /**
    * @return true if top of heap has changed (and KeyValueHeap has to try the
    *         next KV)
@@ -738,7 +756,7 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
       resetScannerStack(this.lastTop);
       if (this.heap.peek() == null
           || store.comparator.compareRows(this.lastTop, this.heap.peek()) != 0) {
-        LOG.debug("DocStoreScanner.peek() is changed where before = "
+        LOG.debug("DocStorescanner.peek() is changed where before = "
             + this.lastTop.toString() + ",and after = " + this.heap.peek());
         this.lastTop = null;
         return true;
@@ -773,16 +791,22 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
     if (kv == null) {
       kv = lastTopKey;
     }
-    if ((matcher.row == null) || !kv.matchingRow(matcher.row)) {
+    byte[] row = kv.getBuffer();
+    int offset = kv.getRowOffset();
+    short length = kv.getRowLength();
+    if ((matcher.row == null) || !Bytes.equals(row, offset, length, matcher.row, matcher.rowOffset, matcher.rowLength)) {
+      this.countPerRow = 0;
       matcher.reset();
-      matcher.setRow(kv.getRow());
+      matcher.setRow(row, offset, length);
     }
   }
 
   @Override
   public synchronized boolean reseek(KeyValue kv) throws IOException {
-    //Heap cannot be null, because this is only called from next() which
-    //guarantees that heap will never be null before this call.
+    //Heap will not be null, if this is called from next() which.
+    //If called from RegionScanner.reseek(...) make sure the scanner
+    //stack is reset if needed.
+    checkReseek();
     if (explicitColumnQuery && lazySeekEnabledGlobally) {
       return heap.requestSeek(kv, true, useRowColBloom);
     } else {
@@ -812,6 +836,5 @@ public class DocStoreScanner extends NonLazyKeyValueScanner
   static void enableLazySeekGlobally(boolean enable) {
     lazySeekEnabledGlobally = enable;
   }
-
 }
 

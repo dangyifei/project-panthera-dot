@@ -157,7 +157,7 @@ public class TestHiveIntegration {
     config.set("hbase.coprocessor.master.classes",
         "com.intel.hadoop.hbase.dot.access.DataDefinitionOps");
     TEST_UTIL.startMiniCluster(1);
-    TEST_UTIL.startMiniMapReduceCluster(1);
+    TEST_UTIL.startMiniMapReduceCluster();
     initialize(TEST_UTIL.getConfiguration());
 
     // 1. To put the test data onto miniDFS, and get the file path
@@ -184,7 +184,4 @@ public class TestHiveIntegration {
     TEST_UTIL.shutdownMiniMapReduceCluster();
     TEST_UTIL.shutdownMiniCluster();
   }
-
-  @org.junit.Rule
-  public org.apache.hadoop.hbase.ResourceCheckerJUnitRule cu = new org.apache.hadoop.hbase.ResourceCheckerJUnitRule();
 }
