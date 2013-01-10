@@ -71,6 +71,7 @@ public class GenerateTestTable {
   private int regionNumber = this.DEFAULT_REGION_NUMBER;
   private long baseRowNumber = 1L;
   private String tableName = null;
+  private boolean createDotTable = false;
 
   
   /**
@@ -268,13 +269,15 @@ public class GenerateTestTable {
     tableSplits = getFourLetterSplits(this.regionNumber);
 
     String DotTableName  =this.tableName + "Dot";
-    createDotTable(DotTableName, layouts, tableSplits);
+    if (this.createDotTable)
+      createDotTable(DotTableName, layouts, tableSplits);
     createNormalTable(tableName, layouts, tableSplits);
 
     HTable htDot = null;
     HTable ht = null;
     try {
-      htDot = new HTable(conf, DotTableName);
+      if (this.createDotTable)
+        htDot = new HTable(conf, DotTableName);
       ht = new HTable(conf, tableName);
     } catch (IOException e) {
       assertNull("Failed to create table", e);
@@ -313,11 +316,13 @@ public class GenerateTestTable {
       }
 
       ht.put(putList);
-      htDot.put(putList);
+      if (this.createDotTable)
+        htDot.put(putList);
       remainRows -= toProcess;
     }
     ht.close();
-    htDot.close();
+    if (this.createDotTable)
+      htDot.close();
   }
 
   protected void printUsage() {
@@ -329,7 +334,7 @@ public class GenerateTestTable {
       System.err.println(message);
     }
     System.err.println("Usage: java " + this.getClass().getName());
-    System.err.println("--table=tablename [--rownum=] [--colnum=] [--cfnum=] [--regions=]");
+    System.err.println("--table=tablename [--rownum=] [--colnum=] [--cfnum=] [--regions=] [--enabledot]");
     System.err.println();
   }
   
@@ -441,7 +446,13 @@ public class GenerateTestTable {
         this.regionNumber = val;    
         continue;
       }
-
+      
+      final String enabledot = "--enabledot";
+      if (cmd.startsWith(enabledot)) {
+        this.createDotTable  = true;    
+        continue;
+      }
+      
       final String table = "--table=";
       if (cmd.startsWith(table)) {
         this.tableName = cmd.substring(table.length());
@@ -466,6 +477,7 @@ public class GenerateTestTable {
     System.out.println("baseRowNumber = " + this.baseRowNumber);
     System.out.println("tablename = " + this.tableName);
     System.out.println("Presplit Region number = " + this.regionNumber);
+    System.out.println("Create dot talbe = " + this.createDotTable);
     return errCode;
   }
 
