@@ -31,14 +31,243 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 
+import org.apache.hadoop.hbase.mapreduce.TableInputFormat;
+import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
+import org.apache.hadoop.hbase.mapreduce.TableSplit;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.mapreduce.InputFormat;
+import org.apache.hadoop.mapreduce.InputSplit;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.JobContext;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.RecordReader;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
+import org.apache.hadoop.mapreduce.Mapper.Context;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.mapreduce.lib.reduce.LongSumReducer;
 import org.apache.hadoop.util.StringUtils;
-import org.junit.Test;
+
+class KEY {
+  public static final String INPUT_TABLE = TableInputFormat.INPUT_TABLE;
+  public static final String OPTION_CFNUM = "test_key_cfnum";
+  public static final String OPTION_COLNUM = "test_key_colnum";
+  public static String OPTION_ROWNUM = "test_key_rownum";
+  public static String OPTION_BASEROWNUM = "test_key_baserownum";
+  public static String OPTION_REGIONROWNUM = "test_key_regionrownum";
+  public static long BATCHNUM = 1000;
+}
+
+class RegionWriteInputFormat extends
+    InputFormat<String, Long> {
+
+  public static class RegionWriteRecordReader extends
+      RecordReader<String, Long> {
+    private TableSplit value = null;
+    private Configuration conf;
+    private long rowNum;
+    private long index = 0L;
+    private long baseRowNumber = 1L;
+    private String regionPrefix = null;
+    private boolean currentValueRead = false;
+
+    public RegionWriteRecordReader(InputSplit split, TaskAttemptContext context)
+        throws IOException, InterruptedException {
+      initialize(split, context);
+    }
+
+    @Override
+    public void initialize(InputSplit split, TaskAttemptContext context)
+        throws IOException, InterruptedException {
+      this.value = (TableSplit) split;
+      conf = context.getConfiguration();
+      this.rowNum = conf.getLong(KEY.OPTION_REGIONROWNUM, 100000L);
+      this.baseRowNumber = conf.getLong(KEY.OPTION_BASEROWNUM , 1L);
+      this.index = 0L;
+      
+      byte[] srow = value.getStartRow();
+      if (srow.length == 0) {
+        // this is the first region, we use "aaaa" for prefix.
+        regionPrefix = "aaaa";        
+      } else {
+        regionPrefix = Bytes.toString(srow);
+      }
+      
+    }
+
+    @Override
+    public boolean nextKeyValue() throws IOException, InterruptedException {
+      if (index >= rowNum) {
+        return false;
+      }
+      if (currentValueRead == true) {
+        index += KEY.BATCHNUM;
+        currentValueRead = false;
+      }
+      return true;
+    }
+
+    @Override
+    public String getCurrentKey() throws IOException,
+        InterruptedException {
+      String s = regionPrefix + Long.toString((this.baseRowNumber + index) / KEY.BATCHNUM);
+      return s;
+    }
+
+    @Override
+    public Long getCurrentValue() throws IOException,
+        InterruptedException {
+      currentValueRead = true;
+      if ((rowNum - index) > KEY.BATCHNUM)
+        return KEY.BATCHNUM;
+      return rowNum - index;
+    }
+
+    @Override
+    public float getProgress() throws IOException, InterruptedException {
+      return index * 1.0f / rowNum;
+    }
+
+    @Override
+    public void close() throws IOException {
+    }
+  }
+
+  @Override
+  public List<InputSplit> getSplits(JobContext context) throws IOException,
+      InterruptedException {
+    TableInputFormat tif = new TableInputFormat();
+    tif.setConf(context.getConfiguration());
+    return tif.getSplits(context);
+  }
+
+  @Override
+  public RecordReader<String, Long> createRecordReader(
+      InputSplit split, TaskAttemptContext context) throws IOException,
+      InterruptedException {
+    return new RegionWriteRecordReader(split, context);
+  }
+}
+
+class GenerateRegionDataTask extends
+    Mapper<String, Long, LongWritable, LongWritable> {
+
+  private int colNum;
+  private int cfNum = 1;
+  private String tableName = null;
+  private HTable ht = null;
+  
+  private Configuration conf;
+
+  @Override
+  protected void setup(Context context) throws IOException,
+      InterruptedException {
+
+    conf = context.getConfiguration();
+
+    this.cfNum = conf.getInt(KEY.OPTION_CFNUM, 1);
+    this.colNum = conf.getInt(KEY.OPTION_COLNUM, 18);
+    this.tableName = conf.get(KEY.INPUT_TABLE);
+    
+    try {
+      ht = new HTable(conf, tableName);
+    } catch (IOException e) {
+      assertNull("Failed to create table", e);
+    }
+    
+  }
+
+  @Override
+  protected void cleanup(Context context) throws IOException,
+      InterruptedException {
+//    context.getCounter(CounterType.ROWS).increment(this.cmd.rows.get());
+//    context.getCounter(CounterType.KVS).increment(this.cmd.kvs.get());
+    if (ht != null)
+      ht.close();
+  }
+
+  @Override
+  protected void map(String prefix, Long rows, final Context context)
+      throws IOException, InterruptedException {
+
+    //long startTime = System.currentTimeMillis();
+    // region write task
+    try {
+        doWrite(prefix, rows, context);        
+    } catch (Exception e) {
+      e.printStackTrace();
+      throw new IOException(e);
+    }
+
+    //long elapsedTime = System.currentTimeMillis() - startTime;
+
+    context.progress();
+  }
+  
+  private void doWrite(String rowPrefix, Long rows, final Context context) throws IOException {
+
+    List<String> familys = new ArrayList<String>();
+    List<String> columns = new ArrayList<String>();
+
+    for (int i = 0; i < this.cfNum; i++) {
+      familys.add("cf" + Integer.toString(i));
+    }
+    
+    for (int i = 0; i < this.colNum; i++) {
+      columns.add("d.f" + Integer.toString(i));
+    }
+
+    long remainRows = rows;
+    long index = 0;
+    int toProcess;
+    String row = null;
+
+    while (remainRows > 0) {
+      toProcess = (int) KEY.BATCHNUM;
+      if (toProcess > remainRows)
+        toProcess = (int) remainRows;
+
+      List<Put> putList = new ArrayList<Put>(toProcess);
+
+      for (long i = 0; i < toProcess; i++) {
+        row = rowPrefix + Long.toString(index);
+
+        Put p = new Put(Bytes.toBytes(row));
+        p.setWriteToWAL(false);
+        for (String family : familys) {
+          for (String column : columns) {
+            
+            KeyValue kv = new KeyValue(
+                Bytes.toBytes(row),
+                Bytes.toBytes(family),
+                Bytes.toBytes(column),
+                HConstants.LATEST_TIMESTAMP,
+                KeyValue.Type.Put,
+                Bytes.toBytes("v" + "-" + column + "-" + row));
+                
+            //KeyValue kv = KeyValueTestUtil.create(row, family, column,
+            //    HConstants.LATEST_TIMESTAMP, "v" + "-" + column + "-" + row);
+            p.add(kv);
+          }
+        }
+        putList.add(p);
+        index++;
+      }
+
+      ht.put(putList);
+      remainRows -= toProcess;
+    }
+  }
+}
 
 
 public class GenerateTestTable {
@@ -46,7 +275,6 @@ public class GenerateTestTable {
   static final Log LOG = LogFactory.getLog(GenerateTestTable.class);
 
   private HBaseAdmin admin = null;
-  private final int BATCHNUM = 10000;
 
   private final int MAX_COLUMN_NUM = 100;
   private final int DEFAULT_COLUMN_NUM = 5;
@@ -83,7 +311,7 @@ public class GenerateTestTable {
   public GenerateTestTable() {
 
   }
-
+  
   private void init(){
     this.conf = HBaseConfiguration.create();
     try {
@@ -95,6 +323,40 @@ public class GenerateTestTable {
       // TODO Auto-generated catch block
       e.printStackTrace();
     }
+  }
+
+  private void doMapReduce(
+      Class<? extends InputFormat> inputFormatClass,
+      Class<? extends Mapper> mapperClass) throws IOException,
+      ClassNotFoundException, InterruptedException {
+
+    Job job = new Job(this.conf);
+    job.setJobName("Generate Data for [" + this.tableName + "]");
+    job.setJarByClass(GenerateTestTable.class);
+
+    job.setInputFormatClass(inputFormatClass);
+
+    job.setOutputKeyClass(LongWritable.class);
+    job.setOutputValueClass(LongWritable.class);
+    
+    FileSystem fs = FileSystem.get(conf);
+    Path path = new Path("/tmp", "tempout");
+    fs.delete(path, true);
+
+    FileOutputFormat.setOutputPath(job, path);
+
+    job.setMapperClass(mapperClass);
+    job.setNumReduceTasks(0);
+
+    TableMapReduceUtil.addDependencyJars(job);
+    // Add a Class from the hbase.jar so it gets registered too.
+    TableMapReduceUtil.addDependencyJars(job.getConfiguration(),
+        org.apache.hadoop.hbase.util.Bytes.class);
+
+    TableMapReduceUtil.initCredentials(job);
+
+    job.waitForCompletion(true);
+
   }
   
   private void createNormalTable(String tableName,
@@ -201,52 +463,6 @@ public class GenerateTestTable {
     }
   }
 
-  List<String> generateRandomWords(int numberOfWords, String suffix) {
-    return generateRandomWords(numberOfWords, suffix, null);
-  }
-
-  List<String> generateRandomWords(int numberOfWords, String suffix,
-      String prefix) {
-    Set<String> wordSet = new HashSet<String>();
-    for (int i = 0; i < numberOfWords; i++) {
-      int lengthOfWords = (int) (Math.random() * 2) + 1;
-      char[] wordChar = new char[lengthOfWords];
-      for (int j = 0; j < wordChar.length; j++) {
-        wordChar[j] = (char) (Math.random() * 26 + 97);
-      }
-      String word;
-      if (suffix == null) {
-        word = new String(wordChar);
-      } else {
-        word = new String(wordChar) + suffix;
-      }
-      if (prefix != null) {
-        word = prefix + word;
-      }
-      wordSet.add(word);
-    }
-    List<String> wordList = new ArrayList<String>(wordSet);
-    return wordList;
-  }
-
-  List<String> generateRandomWords(int numberOfWords, int maxLengthOfWords, String prefix) {
-    Set<String> wordSet = new HashSet<String>();
-    for (int i = 0; i < numberOfWords; i++) {
-      int lengthOfWords = (int) (Math.random() * maxLengthOfWords) + 1;
-      char[] wordChar = new char[lengthOfWords];
-      for (int j = 0; j < wordChar.length; j++) {
-        wordChar[j] = (char) (Math.random() * 26 + 97);
-      }
-      String word = new String(wordChar);
-      if (prefix != null) {
-        word = prefix + word;
-      }
-      wordSet.add(word);
-    }
-    List<String> wordList = new ArrayList<String>(wordSet);
-    return wordList;
-  }
-
   public void createTable() throws Exception {
 
     List<String> familys = new ArrayList<String>();
@@ -273,56 +489,56 @@ public class GenerateTestTable {
       createDotTable(DotTableName, layouts, tableSplits);
     createNormalTable(tableName, layouts, tableSplits);
 
-    HTable htDot = null;
-    HTable ht = null;
-    try {
-      if (this.createDotTable)
-        htDot = new HTable(conf, DotTableName);
-      ht = new HTable(conf, tableName);
-    } catch (IOException e) {
-      assertNull("Failed to create table", e);
-    }
+//    HTable htDot = null;
+//    HTable ht = null;
+//    try {
+//      if (this.createDotTable)
+//        htDot = new HTable(conf, DotTableName);
+//      ht = new HTable(conf, tableName);
+//    } catch (IOException e) {
+//      assertNull("Failed to create table", e);
+//    }
+//
+//    long remainRows = this.rowNum;
+//    long index = 0;
+//    int toProcess;
+//    String row = null;
+//
+//    while (remainRows > 0) {
+//      toProcess = this.BATCHNUM;
+//      if (toProcess > remainRows)
+//        toProcess = (int)remainRows;
+//
+//      List<Put> putList = new ArrayList<Put>(toProcess);
 
-    long remainRows = this.rowNum;
-    long index = 0;
-    int toProcess;
-    String row = null;
-
-    while (remainRows > 0) {
-      toProcess = this.BATCHNUM;
-      if (toProcess > remainRows)
-        toProcess = (int)remainRows;
-
-      List<Put> putList = new ArrayList<Put>(toProcess);
-
-      for (long i = 0; i < toProcess; i++){
-        row = rowPrefix[(int)((index / (26*26*26)) % 26)]
-            + rowPrefix[(int)((index / (26*26)) % 26)]
-            + rowPrefix[(int)((index / 26) % 26)] 
-            + rowPrefix[(int)(index % 26)]
-            + Long.toString(this.baseRowNumber + index);
-        
-        Put p = new Put(Bytes.toBytes(row));
-        p.setWriteToWAL(false);
-        for (String family : familys) {
-          for (String column : columns) {
-            KeyValue kv = KeyValueTestUtil.create(row, family, column,
-                HConstants.LATEST_TIMESTAMP, "v" + "-" + column + "-" + row);
-            p.add(kv);
-          }
-        }
-        putList.add(p);
-        index++;
-      }
-
-      ht.put(putList);
-      if (this.createDotTable)
-        htDot.put(putList);
-      remainRows -= toProcess;
-    }
-    ht.close();
-    if (this.createDotTable)
-      htDot.close();
+//      for (long i = 0; i < toProcess; i++){
+//        row = rowPrefix[(int)((index / (26*26*26)) % 26)]
+//            + rowPrefix[(int)((index / (26*26)) % 26)]
+//            + rowPrefix[(int)((index / 26) % 26)] 
+//            + rowPrefix[(int)(index % 26)]
+//            + Long.toString(this.baseRowNumber + index);
+//        
+//        Put p = new Put(Bytes.toBytes(row));
+//        p.setWriteToWAL(false);
+//        for (String family : familys) {
+//          for (String column : columns) {
+//            KeyValue kv = KeyValueTestUtil.create(row, family, column,
+//                HConstants.LATEST_TIMESTAMP, "v" + "-" + column + "-" + row);
+//            p.add(kv);
+//          }
+//        }
+//        putList.add(p);
+//        index++;
+//      }
+//
+//      ht.put(putList);
+//      if (this.createDotTable)
+//        htDot.put(putList);
+//      remainRows -= toProcess;
+//    }
+//    ht.close();
+//    if (this.createDotTable)
+//      htDot.close();
   }
 
   protected void printUsage() {
@@ -336,43 +552,6 @@ public class GenerateTestTable {
     System.err.println("Usage: java " + this.getClass().getName());
     System.err.println("--table=tablename [--rownum=] [--colnum=] [--cfnum=] [--regions=] [--enabledot]");
     System.err.println();
-  }
-  
-  
-  private byte[][] getLetterSplits(int n) {
-    assert(n > 0 && n < 26);
-    byte[][] splits = new byte[n-1][];
-
-    double step = 26.0 / n;
-    double offset = 0.0;
-    long index;
-    char[] letter = new char[1];
-    for (int i = 0; i < (n-1); i++) {
-      offset += step;
-      index = Math.round(offset);
-      letter[0] = (char) (index + 97);
-      splits[i] = Bytes.toBytes(new String(letter));
-    }
-    return splits;
-  }
-
-  private byte[][] getTwoLetterSplits(int n) {
-    double range = 26.0 * 26.0;
-    assert(n > 0 && n < range);
-    byte[][] splits = new byte[n-1][];
-
-    double step = range / n;
-    double offset = 0.0;
-    long index;
-    char[] letter = new char[2];
-    for (int i = 0; i < (n-1); i++) {
-      offset += step;
-      index = Math.round(offset);
-      letter[0] = (char) ((index / 26) + 97);
-      letter[1] = (char) ((index % 26) + 97);
-      splits[i] = Bytes.toBytes(new String(letter));
-    }
-    return splits;
   }
 
   private byte[][] getFourLetterSplits(int n) {
@@ -417,6 +596,7 @@ public class GenerateTestTable {
         if (val <= 0 || val > this.MAX_COLUMN_NUM)
           val = this.DEFAULT_COLUMN_NUM;
         this.colNum = val;
+        this.conf.setLong(KEY.OPTION_COLNUM, this.colNum);
         continue;
       }
 
@@ -426,6 +606,7 @@ public class GenerateTestTable {
         if (val <= 0 || val > this.MAX_FAMILY_NUM)
           val = this.DEFAULT_FAMILY_NUM;
         this.cfNum = val;
+        this.conf.setInt(KEY.OPTION_CFNUM, this.cfNum);
         continue;
       }
       
@@ -434,10 +615,10 @@ public class GenerateTestTable {
         long val = Long.decode(cmd.substring(rows.length()));
         if (val <= 0 || val > this.MAX_ROW_NUM)
           val = this.DEFAULT_ROW_NUM;
-        this.rowNum = val;        
+        this.rowNum = val;
         continue;
       }
-
+      
       final String regions = "--regions=";
       if (cmd.startsWith(regions)) {
         int val = Integer.parseInt(cmd.substring(regions.length()));
@@ -456,6 +637,7 @@ public class GenerateTestTable {
       final String table = "--table=";
       if (cmd.startsWith(table)) {
         this.tableName = cmd.substring(table.length());
+        this.conf.set(KEY.INPUT_TABLE, tableName);
         continue;
       }
     }
@@ -466,38 +648,22 @@ public class GenerateTestTable {
     }
 
     this.baseRowNumber = 1L;
-    
     while(this.baseRowNumber < this.rowNum) {
       this.baseRowNumber *= 10L;
     }
-   
+
+    this.conf.setLong(KEY.OPTION_BASEROWNUM, this.baseRowNumber);
+    this.conf.setLong(KEY.OPTION_REGIONROWNUM , this.rowNum / this.regionNumber);
+
     System.out.println("cfnum = " + this.cfNum);
     System.out.println("colnum = " + this.colNum);
     System.out.println("rownum = " + this.rowNum);
     System.out.println("baseRowNumber = " + this.baseRowNumber);
     System.out.println("tablename = " + this.tableName);
     System.out.println("Presplit Region number = " + this.regionNumber);
-    System.out.println("Create dot talbe = " + this.createDotTable);
+    System.out.println("row per region = " + this.rowNum / this.regionNumber);
+    System.out.println("Also create dot table = " + this.createDotTable);
     return errCode;
-  }
-
-  /**
-   * do tmp test here.
-   * @throws IOException
-   */
-  @Test
-  public void test() throws IOException {
-    String[] fakeArgs = {
-        "--cfnum=5",
-        "--colnum=10",
-        "--rownum=10000",
-        "--table=testDataTable",
-        "--regions=32"
-    };
-
-    parseCommandLine(fakeArgs);
-    byte[][] splits = getLetterSplits(12);
-    byte[][] splits2 = getTwoLetterSplits(64);
   }
 
   /**
@@ -506,11 +672,31 @@ public class GenerateTestTable {
    */
   public static void main(final String[] args) throws Exception {
     GenerateTestTable gt = new GenerateTestTable();
+    gt.init();
     if (gt.parseCommandLine(args) != 0) {
       System.err.println("fail to parse cmdline");
       return;
     }
-    gt.init();
     gt.createTable();
+    gt.doMapReduce(RegionWriteInputFormat.class,
+          GenerateRegionDataTask.class);
+  }
+  
+  /**
+   * for test usage.
+   * @param args
+   * @throws Exception
+   */
+  public static void testmain(final String[] args,Configuration conf) throws Exception {
+    GenerateTestTable gt = new GenerateTestTable();
+    gt.conf = conf;
+    gt.admin = new HBaseAdmin(gt.conf);
+    if (gt.parseCommandLine(args) != 0) {
+      System.err.println("fail to parse cmdline");
+      return;
+    }
+    gt.createTable();
+    gt.doMapReduce(RegionWriteInputFormat.class,
+          GenerateRegionDataTask.class);
   }
 }
