@@ -380,6 +380,7 @@ public class PerformanceEvaluation2 {
     public static final String KEY_OPTION_FILTER = "key_filter";
     public static final String KEY_OPTION_PERIOD = "key_report_period";
     public static final String KEY_OPTION_IGNORERESULT = "key_ignoreresult";
+    public static final String KEY_OPTION_REPEAT_TIMES = "key_repeat_times";
 
     protected Status status = new Status() {
       @Override
@@ -391,6 +392,7 @@ public class PerformanceEvaluation2 {
     protected int reportPeriod = 100000;
     protected int cacheSize = 1000;
     protected long maxRows = 0;
+    protected int repeatTimes = 1;
     protected String cols;
     protected Configuration conf = null;
 
@@ -410,6 +412,7 @@ public class PerformanceEvaluation2 {
       this.cols = conf.get(KEY_OPTION_SCAN_COLS);
       this.cacheSize = conf.getInt(KEY_OPTION_CACHE_SIZE, 1000);
       this.maxRows = conf.getLong(KEY_OPTION_ROWS, Long.MAX_VALUE);
+      this.repeatTimes = conf.getInt(KEY_OPTION_REPEAT_TIMES, 1);
 
       this.conf = conf;
     }
@@ -498,63 +501,67 @@ public class PerformanceEvaluation2 {
       HTable table = new HTable(conf, conf.get(KEY_INPUT_TABLE));
 
       try {
-        Scan scan = new Scan(startKey, endKey);
-        String filterName = conf.get(Test.KEY_OPTION_FILTER);
-        if (null != filterName && !filterName.isEmpty()) {
-          if (filterName.equalsIgnoreCase("Stop"))
-            return;
-          if (filterName.equalsIgnoreCase("KeyOnly"))
-            scan.setFilter(new KeyOnlyFilter());
-          if (filterName.equalsIgnoreCase("Prefix"))
-            scan.setFilter(new PrefixFilter());
-        }
-
-        scan.setCaching(this.cacheSize);
-        
-        String cacheblock = conf.get(Test.OPTION_CACHE_BLOCK);
-        
-        scan.setCacheBlocks(false);
-        if (null != cacheblock && !cacheblock.isEmpty()) {
-          if (cacheblock.equalsIgnoreCase("true"))
-            scan.setCacheBlocks(true);
-        }
-
-        this.addColumns(scan, this.cols);
-        ResultScanner rs = table.getScanner(scan);
-
-        String ignoreResult = conf.get(Test.KEY_OPTION_IGNORERESULT);
-        boolean skipResult = false;
-        if (null != ignoreResult && !ignoreResult.isEmpty()) {
-          if (ignoreResult.equalsIgnoreCase("true")) {
-            skipResult = true;
-          }
-        }
-          
-        while (true) {
-          if (rows.get() >= limit) {
-            break;
-          }
-          Result result = rs.next();
-
-          if (null == result) {
-            break;
-          }
-          
-          if (skipResult)
-            continue;
-
-          kvs.add(getResultColsCount(result));
-          byte[] key = result.getRow();
-
-          if (status != null && rows.get() > 0
-              && (rows.get() % getReportingPeriod()) == 0) {
-            status.setStatus(generateStatus(Bytes.toStringBinary(key),
-                rows.get()));
+        for (int i = 0; i < repeatTimes; i++) {
+          Scan scan = new Scan(startKey, endKey);
+          String filterName = conf.get(Test.KEY_OPTION_FILTER);
+          if (null != filterName && !filterName.isEmpty()) {
+            if (filterName.equalsIgnoreCase("Stop"))
+              return;
+            if (filterName.equalsIgnoreCase("KeyOnly"))
+              scan.setFilter(new KeyOnlyFilter());
+            if (filterName.equalsIgnoreCase("Prefix"))
+              scan.setFilter(new PrefixFilter());
           }
 
-          rows.increment();
+          scan.setCaching(this.cacheSize);
+
+          String cacheblock = conf.get(Test.OPTION_CACHE_BLOCK);
+
+          scan.setCacheBlocks(false);
+          if (null != cacheblock && !cacheblock.isEmpty()) {
+            if (cacheblock.equalsIgnoreCase("true"))
+              scan.setCacheBlocks(true);
+          }
+
+          this.addColumns(scan, this.cols);
+
+          String ignoreResult = conf.get(Test.KEY_OPTION_IGNORERESULT);
+          boolean skipResult = false;
+          if (null != ignoreResult && !ignoreResult.isEmpty()) {
+            if (ignoreResult.equalsIgnoreCase("true")) {
+              skipResult = true;
+            }
+          }
+
+          ResultScanner rs = table.getScanner(scan);
+
+          while (true) {
+            if (rows.get() >= limit) {
+              break;
+            }
+            Result result = rs.next();
+
+            if (null == result) {
+              break;
+            }
+
+            if (skipResult)
+              continue;
+
+            kvs.add(getResultColsCount(result));
+            byte[] key = result.getRow();
+
+            if (status != null && rows.get() > 0
+                && (rows.get() % getReportingPeriod()) == 0) {
+              status.setStatus(generateStatus(Bytes.toStringBinary(key),
+                  rows.get()));
+            }
+
+            rows.increment();
+          }
+          rs.close();
         }
-        rs.close();
+
       } finally {
         table.close();
       }
@@ -626,7 +633,8 @@ public class PerformanceEvaluation2 {
     }
     System.err.println("Usage: java " + this.getClass().getName() + " \\");
     System.err
-        .println(" <--type=native|mapred|mapred2> [--enablecacheblock] [--ignoreresult] [--rows=] --table=abc --cols=\"f:col1 f:col2\" --filter=org.apache.hadoop.hbase.filter.PrefixFilter [nThreads]");
+        .println(" <--type=native|mapred|mapred2> [--enablecacheblock] [--ignoreresult] [--rows=] [--repeat=]" +
+        		" --table=abc --cols=\"f:col1 f:col2\" --filter=org.apache.hadoop.hbase.filter.PrefixFilter [nThreads]");
     System.err.println();
   }
 
@@ -704,6 +712,13 @@ public class PerformanceEvaluation2 {
         this.conf.set(Test.KEY_OPTION_FILTER, filterName == null ? ""
             : filterName);
         System.out.println("---- filter = " + filterName);
+        continue;
+      }
+
+      final String repeats = "--repeat=";
+      if (cmd.startsWith(repeats)) {
+        String repeatTimes = cmd.substring(repeats.length());
+        this.conf.set(Test.KEY_OPTION_REPEAT_TIMES, repeatTimes);
         continue;
       }
 
