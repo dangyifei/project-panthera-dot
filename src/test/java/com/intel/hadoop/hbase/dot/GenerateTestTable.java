@@ -301,6 +301,8 @@ public class GenerateTestTable {
   private String tableName = null;
   private boolean createDotTable = false;
 
+  private String dotTableName;
+
   
   /**
    * Constructor
@@ -327,11 +329,13 @@ public class GenerateTestTable {
 
   private void doMapReduce(
       Class<? extends InputFormat> inputFormatClass,
-      Class<? extends Mapper> mapperClass) throws IOException,
+      Class<? extends Mapper> mapperClass,
+      String mrTableName) throws IOException,
       ClassNotFoundException, InterruptedException {
 
+    this.conf.set(KEY.INPUT_TABLE, mrTableName);
     Job job = new Job(this.conf);
-    job.setJobName("Generate Data for [" + this.tableName + "]");
+    job.setJobName("Generate Data for [" + mrTableName + "]");
     job.setJarByClass(GenerateTestTable.class);
 
     job.setInputFormatClass(inputFormatClass);
@@ -484,9 +488,9 @@ public class GenerateTestTable {
     
     tableSplits = getFourLetterSplits(this.regionNumber);
 
-    String DotTableName  =this.tableName + "Dot";
+    this.dotTableName  =this.tableName + "Dot";
     if (this.createDotTable)
-      createDotTable(DotTableName, layouts, tableSplits);
+      createDotTable(this.dotTableName, layouts, tableSplits);
     createNormalTable(tableName, layouts, tableSplits);
 
 //    HTable htDot = null;
@@ -613,7 +617,7 @@ public class GenerateTestTable {
       final String rows = "--rownum=";
       if (cmd.startsWith(rows)) {
         long val = Long.decode(cmd.substring(rows.length()));
-        if (val <= 0 || val > this.MAX_ROW_NUM)
+        if (val < 0 || val > this.MAX_ROW_NUM)
           val = this.DEFAULT_ROW_NUM;
         this.rowNum = val;
         continue;
@@ -637,7 +641,6 @@ public class GenerateTestTable {
       final String table = "--table=";
       if (cmd.startsWith(table)) {
         this.tableName = cmd.substring(table.length());
-        this.conf.set(KEY.INPUT_TABLE, tableName);
         continue;
       }
     }
@@ -678,8 +681,21 @@ public class GenerateTestTable {
       return;
     }
     gt.createTable();
+    
+    if (gt.rowNum == 0) {
+      System.out.println("rowNum=0, only create table");
+      return;
+    }
+
     gt.doMapReduce(RegionWriteInputFormat.class,
-          GenerateRegionDataTask.class);
+          GenerateRegionDataTask.class,
+          gt.tableName);
+    
+    if (gt.createDotTable) {
+      gt.doMapReduce(RegionWriteInputFormat.class,
+          GenerateRegionDataTask.class,
+          gt.dotTableName);
+    }
   }
   
   /**
@@ -696,7 +712,20 @@ public class GenerateTestTable {
       return;
     }
     gt.createTable();
+    
+    if (gt.rowNum == 0) {
+      System.out.println("rowNum=0, only create table");
+      return;
+    }
+
     gt.doMapReduce(RegionWriteInputFormat.class,
-          GenerateRegionDataTask.class);
+          GenerateRegionDataTask.class,
+          gt.tableName);
+    
+    if (gt.createDotTable) {
+      gt.doMapReduce(RegionWriteInputFormat.class,
+          GenerateRegionDataTask.class,
+          gt.dotTableName);
+    }
   }
 }

@@ -47,7 +47,8 @@ public class TestDataGenerate {
         "--colnum=2",
         "--rownum=100",
         "--table=testDataTable",
-        "--regions=3"
+        "--regions=3",
+        "--enabledot"
     };
    
     try {

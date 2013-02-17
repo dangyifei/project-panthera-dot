@@ -510,7 +510,7 @@ public class PerformanceEvaluation2 {
             if (filterName.equalsIgnoreCase("KeyOnly"))
               scan.setFilter(new KeyOnlyFilter());
             if (filterName.equalsIgnoreCase("Prefix"))
-              scan.setFilter(new PrefixFilter());
+              scan.setFilter(new PrefixFilter(null));
           }
 
           scan.setCaching(this.cacheSize);
