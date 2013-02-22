@@ -20,3 +20,6 @@ HBase is an open source implementation of BigTable, which provides very flexible
 
 * *Query performance*. Query processing on HBase can be much (sometimes 3~5x) slower than that on HDFS due to various reasons. One of the reason is related to how HBase handles data accesses – HBase provides very good support for highly concurrent read/write accesses; consequently, one needs to pay some amount of overheads (e.g., concurrency control) for each column read. On the other hand, data accesses in analytical query processing are predominantly read (with some append), and should preferably avoid the column read overheads.
 
+#### Build and Install ####
+
+Reference INSTALL.txt
